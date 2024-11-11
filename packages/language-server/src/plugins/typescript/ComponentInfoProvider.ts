@@ -1,25 +1,26 @@
-import { ComponentEvents } from 'svelte2tsx';
 import ts from 'typescript';
-import { flatten, isNotNullOrUndefined } from '../../utils';
+import { isNotNullOrUndefined } from '../../utils';
 import { findContainingNode } from './features/utils';
 
-export type ComponentPartInfo = ReturnType<ComponentEvents['getAll']>;
+export type ComponentPartInfo = Array<{ name: string; type: string; doc?: string }>;
 
 export interface ComponentInfoProvider {
     getEvents(): ComponentPartInfo;
     getSlotLets(slot?: string): ComponentPartInfo;
     getProps(): ComponentPartInfo;
-    getProp(propName: string): ts.CompletionEntry[];
 }
 
 export class JsOrTsComponentInfoProvider implements ComponentInfoProvider {
     private constructor(
         private readonly typeChecker: ts.TypeChecker,
-        private readonly classType: ts.Type
+        private readonly classType: ts.Type,
+        private readonly useSvelte5PlusPropsParameter: boolean = false
     ) {}
 
     getEvents(): ComponentPartInfo {
-        const eventType = this.getType('$$events_def');
+        const eventType = this.getType(
+            this.useSvelte5PlusPropsParameter ? '$$events' : '$$events_def'
+        );
         if (!eventType) {
             return [];
         }
@@ -28,7 +29,7 @@ export class JsOrTsComponentInfoProvider implements ComponentInfoProvider {
     }
 
     getSlotLets(slot = 'default'): ComponentPartInfo {
-        const slotType = this.getType('$$slot_def');
+        const slotType = this.getType(this.useSvelte5PlusPropsParameter ? '$$slots' : '$$slot_def');
         if (!slotType) {
             return [];
         }
@@ -47,67 +48,18 @@ export class JsOrTsComponentInfoProvider implements ComponentInfoProvider {
     }
 
     getProps() {
-        const props = this.getType('$$prop_def');
-        if (!props) {
-            return [];
+        if (!this.useSvelte5PlusPropsParameter) {
+            const props = this.getType('$$prop_def');
+            if (!props) {
+                return [];
+            }
+
+            return this.mapPropertiesOfType(props);
         }
 
-        return this.mapPropertiesOfType(props);
-    }
-
-    getProp(propName: string): ts.CompletionEntry[] {
-        const props = this.getType('$$prop_def');
-        if (!props) {
-            return [];
-        }
-
-        const prop = props.getProperties().find((prop) => prop.name === propName);
-        if (!prop?.valueDeclaration) {
-            return [];
-        }
-
-        const propDef = this.typeChecker.getTypeOfSymbolAtLocation(prop, prop.valueDeclaration);
-
-        if (!propDef.isUnion()) {
-            return [];
-        }
-
-        const types = flatten(propDef.types.map((type) => this.getStringLiteralTypes(type)));
-
-        // adopted from https://github.com/microsoft/TypeScript/blob/0921eac6dc9eba0be6319dff10b85d60c90155ea/src/services/stringCompletions.ts#L61
-        return types.map((v) => ({
-            name: v.value,
-            kindModifiers: ts.ScriptElementKindModifier.none,
-            kind: ts.ScriptElementKind.string,
-            sortText: /**LocationPriority: */ '11'
-        }));
-    }
-
-    /**
-     * adopted from https://github.com/microsoft/TypeScript/blob/0921eac6dc9eba0be6319dff10b85d60c90155ea/src/services/stringCompletions.ts#L310
-     */
-    private getStringLiteralTypes(
-        type: ts.Type | undefined,
-        uniques = new Set<string>()
-    ): ts.StringLiteralType[] {
-        if (!type) {
-            return [];
-        }
-
-        type = type.isTypeParameter() ? type.getConstraint() || type : type;
-
-        if (type.isUnion()) {
-            return flatten(type.types.map((t) => this.getStringLiteralTypes(t, uniques)));
-        }
-
-        if (
-            type.isStringLiteral() &&
-            !(type.flags & ts.TypeFlags.EnumLiteral) &&
-            !uniques.has(type.value)
-        ) {
-            return [type];
-        }
-        return [];
+        return this.mapPropertiesOfType(this.classType).filter(
+            (prop) => !prop.name.startsWith('$$')
+        );
     }
 
     private getType(classProperty: string) {
@@ -124,7 +76,11 @@ export class JsOrTsComponentInfoProvider implements ComponentInfoProvider {
             .getProperties()
             .map((prop) => {
                 // type would still be correct when there're multiple declarations
-                const declaration = prop.valueDeclaration ?? prop.declarations?.[0];
+                const declaration =
+                    prop.valueDeclaration ??
+                    prop.declarations?.[0] ??
+                    // very complex types are hidden on this thing for some reason
+                    (prop as any)?.links?.mappedType?.declaration;
                 if (!declaration) {
                     return;
                 }
@@ -144,7 +100,11 @@ export class JsOrTsComponentInfoProvider implements ComponentInfoProvider {
      * The result of this shouldn't be cached as it could lead to memory leaks. The type checker
      * could become old and then multiple versions of it could exist.
      */
-    static create(lang: ts.LanguageService, def: ts.DefinitionInfo): ComponentInfoProvider | null {
+    static create(
+        lang: ts.LanguageService,
+        def: ts.DefinitionInfo,
+        isSvelte5Plus: boolean
+    ): ComponentInfoProvider | null {
         const program = lang.getProgram();
         const sourceFile = program?.getSourceFile(def.fileName);
 
@@ -152,19 +112,53 @@ export class JsOrTsComponentInfoProvider implements ComponentInfoProvider {
             return null;
         }
 
-        const defClass = findContainingNode(sourceFile, def.textSpan, ts.isClassDeclaration);
+        const defIdentifier = findContainingNode(sourceFile, def.textSpan, ts.isIdentifier);
 
-        if (!defClass) {
+        if (!defIdentifier) {
             return null;
         }
 
         const typeChecker = program.getTypeChecker();
-        const classType = typeChecker.getTypeAtLocation(defClass);
 
-        if (!classType) {
+        const componentSymbol = typeChecker.getSymbolAtLocation(defIdentifier);
+
+        if (!componentSymbol) {
             return null;
         }
 
-        return new JsOrTsComponentInfoProvider(typeChecker, classType);
+        const type = typeChecker.getTypeOfSymbolAtLocation(componentSymbol, defIdentifier);
+
+        if (type.isClass()) {
+            return new JsOrTsComponentInfoProvider(typeChecker, type);
+        }
+
+        const constructorSignatures = type.getConstructSignatures();
+        if (constructorSignatures.length === 1) {
+            return new JsOrTsComponentInfoProvider(
+                typeChecker,
+                constructorSignatures[0].getReturnType()
+            );
+        }
+
+        if (!isSvelte5Plus) {
+            return null;
+        }
+
+        const signatures = type.getCallSignatures();
+        if (signatures.length !== 1) {
+            return null;
+        }
+
+        const propsParameter = signatures[0].parameters[1];
+        if (!propsParameter) {
+            return null;
+        }
+        const propsParameterType = typeChecker.getTypeOfSymbol(propsParameter);
+
+        return new JsOrTsComponentInfoProvider(
+            typeChecker,
+            propsParameterType,
+            /** useSvelte5PlusPropsParameter */ true
+        );
     }
 }

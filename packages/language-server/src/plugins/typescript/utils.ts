@@ -6,9 +6,10 @@ import {
     DiagnosticTag,
     Position,
     Range,
-    SymbolKind
+    SymbolKind,
+    Location
 } from 'vscode-languageserver';
-import { Document, isInTag, mapRangeToOriginal } from '../../lib/documents';
+import { Document, isInTag, mapLocationToOriginal, mapRangeToOriginal } from '../../lib/documents';
 import { GetCanonicalFileName, pathToUrl } from '../../utils';
 import { DocumentSnapshot, SvelteDocumentSnapshot } from './DocumentSnapshot';
 
@@ -69,15 +70,17 @@ export function isSvelteFilePath(filePath: string) {
 }
 
 export function isVirtualSvelteFilePath(filePath: string) {
-    return filePath.endsWith('.svelte.ts');
+    return filePath.endsWith('.d.svelte.ts');
 }
 
 export function toRealSvelteFilePath(filePath: string) {
-    return filePath.slice(0, -'.ts'.length);
+    return filePath.slice(0, -11 /* 'd.svelte.ts'.length */) + 'svelte';
 }
 
-export function toVirtualSvelteFilePath(filePath: string) {
-    return filePath.endsWith('.ts') ? filePath : filePath + '.ts';
+export function toVirtualSvelteFilePath(svelteFilePath: string) {
+    return isVirtualSvelteFilePath(svelteFilePath)
+        ? svelteFilePath
+        : svelteFilePath.slice(0, -6 /* 'svelte'.length */) + 'd.svelte.ts';
 }
 
 export function ensureRealSvelteFilePath(filePath: string) {
@@ -96,7 +99,25 @@ export function convertRange(
 
 export function convertToLocationRange(snapshot: DocumentSnapshot, textSpan: ts.TextSpan): Range {
     const range = mapRangeToOriginal(snapshot, convertRange(snapshot, textSpan));
-    // Some definition like the svelte component class definition don't exist in the original, so we map to 0,1
+
+    mapUnmappedToTheStartOfFile(range);
+
+    return range;
+}
+
+export function convertToLocationForReferenceOrDefinition(
+    snapshot: DocumentSnapshot,
+    textSpan: ts.TextSpan
+): Location {
+    const location = mapLocationToOriginal(snapshot, convertRange(snapshot, textSpan));
+
+    mapUnmappedToTheStartOfFile(location.range);
+
+    return location;
+}
+
+/**Some definition like the svelte component class definition don't exist in the original, so we map to 0,1*/
+function mapUnmappedToTheStartOfFile(range: Range) {
     if (range.start.line < 0) {
         range.start.line = 0;
         range.start.character = 1;
@@ -104,8 +125,6 @@ export function convertToLocationRange(snapshot: DocumentSnapshot, textSpan: ts.
     if (range.end.line < 0) {
         range.end = range.start;
     }
-
-    return range;
 }
 
 export function hasNonZeroRange({ range }: { range?: Range }): boolean {
@@ -132,13 +151,19 @@ export function findTsConfigPath(
 ) {
     const searchDir = dirname(fileName);
 
-    const path =
-        ts.findConfigFile(searchDir, fileExists, 'tsconfig.json') ||
-        ts.findConfigFile(searchDir, fileExists, 'jsconfig.json') ||
-        '';
-    // Don't return config files that exceed the current workspace context.
-    return !!path && rootUris.some((rootUri) => isSubPath(rootUri, path, getCanonicalFileName))
-        ? path
+    const tsconfig = ts.findConfigFile(searchDir, fileExists, 'tsconfig.json') || '';
+    const jsconfig = ts.findConfigFile(searchDir, fileExists, 'jsconfig.json') || '';
+    // Prefer closest config file
+    const config = tsconfig.length >= jsconfig.length ? tsconfig : jsconfig;
+
+    // Don't return config files that exceed the current workspace context or cross a node_modules folder
+    return !!config &&
+        rootUris.some((rootUri) => isSubPath(rootUri, config, getCanonicalFileName)) &&
+        !fileName
+            .substring(config.length - 13)
+            .split('/')
+            .includes('node_modules')
+        ? config
         : '';
 }
 
@@ -150,6 +175,16 @@ export function isSubPath(
     // URL escape codes are in upper-case
     // so getCanonicalFileName should be called after converting to file url
     return getCanonicalFileName(pathToUrl(possibleSubPath)).startsWith(getCanonicalFileName(uri));
+}
+
+export function getNearestWorkspaceUri(
+    workspaceUris: string[],
+    path: string,
+    getCanonicalFileName: GetCanonicalFileName
+) {
+    return Array.from(workspaceUris)
+        .sort((a, b) => b.length - a.length)
+        .find((workspaceUri) => isSubPath(workspaceUri, path, getCanonicalFileName));
 }
 
 export function symbolKindFromString(kind: string): SymbolKind {
@@ -270,7 +305,6 @@ const commentsRegex = /^(\s*\/\/.*\s*)*/;
 // - what's coming after @ts-(no)check is irrelevant as long there is any kind of whitespace or line break, so this would be picked up, too: // @ts-check asdasd
 // [ \t\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]
 // is just \s (a.k.a any whitespace character) without linebreak and vertical tab
-// eslint-disable-next-line max-len
 const tsCheckRegex =
     /\/\/[ \t\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]*(@ts-(no)?check)($|\s)/;
 
@@ -318,10 +352,28 @@ export function changeSvelteComponentName(name: string) {
     return name.replace(/(\w+)__SvelteComponent_/, '$1');
 }
 
+const COMPONENT_SUFFIX = '__SvelteComponent_';
+
+export function isGeneratedSvelteComponentName(className: string) {
+    return className.endsWith(COMPONENT_SUFFIX);
+}
+
+export function offsetOfGeneratedComponentExport(snapshot: SvelteDocumentSnapshot) {
+    return snapshot.getFullText().lastIndexOf(COMPONENT_SUFFIX);
+}
+
+export function toGeneratedSvelteComponentName(className: string) {
+    return className + COMPONENT_SUFFIX;
+}
+
 export function hasTsExtensions(fileName: string) {
     return (
         fileName.endsWith(ts.Extension.Dts) ||
         fileName.endsWith(ts.Extension.Tsx) ||
         fileName.endsWith(ts.Extension.Ts)
     );
+}
+
+export function isSvelte2tsxShimFile(fileName: string | undefined) {
+    return fileName?.endsWith('svelte-shims.d.ts') || fileName?.endsWith('svelte-shims-v4.d.ts');
 }

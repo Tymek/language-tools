@@ -1,26 +1,44 @@
 import MagicString from 'magic-string';
-import { rangeWithTrailingPropertyAccess, TransformationArray } from '../utils/node-utils';
+import {
+    getEnd,
+    isTypescriptNode,
+    rangeWithTrailingPropertyAccess,
+    TransformationArray
+} from '../utils/node-utils';
 import { BaseDirective, BaseNode } from '../../interfaces';
 import { Element } from './Element';
 import { InlineComponent } from './InlineComponent';
+import { surroundWithIgnoreComments } from '../../utils/ignore';
 
+/**
+ * List of binding names that are transformed to sth like `binding = variable`.
+ */
 const oneWayBindingAttributes: Set<string> = new Set([
     'clientWidth',
     'clientHeight',
     'offsetWidth',
     'offsetHeight',
     'duration',
-    'buffered',
-    'seekable',
     'seeking',
-    'played',
-    'ended'
+    'ended',
+    'readyState',
+    'naturalWidth',
+    'naturalHeight'
 ]);
+
 /**
- * List of all binding names that are transformed to sth like `binding = variable`.
- * This applies to readonly bindings and the this binding.
+ * List of binding names that are transformed to sth like `binding = variable as GeneratedCode`.
  */
-export const assignmentBindings = new Set([...oneWayBindingAttributes.keys(), 'this']);
+const oneWayBindingAttributesNotOnElement: Map<string, string> = new Map([
+    ['contentRect', 'DOMRectReadOnly'],
+    ['contentBoxSize', 'ResizeObserverSize[]'],
+    ['borderBoxSize', 'ResizeObserverSize[]'],
+    ['devicePixelContentBoxSize', 'ResizeObserverSize[]'],
+    // available on the element, but with a different type
+    ['buffered', "import('svelte/elements').SvelteMediaTimeRange[]"],
+    ['played', "import('svelte/elements').SvelteMediaTimeRange[]"],
+    ['seekable', "import('svelte/elements').SvelteMediaTimeRange[]"]
+]);
 
 const supportsBindThis = [
     'InlineComponent',
@@ -37,14 +55,13 @@ export function handleBinding(
     attr: BaseDirective,
     parent: BaseNode,
     element: Element | InlineComponent,
-    preserveBind: boolean
+    preserveBind: boolean,
+    isSvelte5Plus: boolean
 ): void {
     // bind group on input
     if (element instanceof Element && attr.name == 'group' && parent.name == 'input') {
-        element.appendToStartEnd([
-            rangeWithTrailingPropertyAccess(str.original, attr.expression),
-            ';'
-        ]);
+        // add reassignment to force TS to widen the type of the declaration (in case it's never reassigned anywhere else)
+        appendOneWayBinding(attr, ' = __sveltets_2_any(null)', element);
         return;
     }
 
@@ -55,21 +72,32 @@ export function handleBinding(
         // Note: If the component unmounts (it's inside an if block, or svelte:component this={null},
         // the value becomes null, but we don't add it to the clause because it would introduce
         // worse DX for the 99% use case, and because null !== undefined which others might use to type the declaration.
-        element.appendToStartEnd([
-            [attr.expression.start, attr.expression.end],
-            ` = ${element.name};`
-        ]);
+        appendOneWayBinding(attr, ` = ${element.name}`, element);
         return;
     }
 
     // one way binding
     if (oneWayBindingAttributes.has(attr.name) && element instanceof Element) {
+        appendOneWayBinding(attr, `= ${element.name}.${attr.name}`, element);
+        return;
+    }
+
+    // one way binding whose property is not on the element
+    if (oneWayBindingAttributesNotOnElement.has(attr.name) && element instanceof Element) {
         element.appendToStartEnd([
-            [attr.expression.start, attr.expression.end],
-            `= ${element.name}.${attr.name};`
+            [attr.expression.start, getEnd(attr.expression)],
+            `= ${surroundWithIgnoreComments(
+                `null as ${oneWayBindingAttributesNotOnElement.get(attr.name)}`
+            )};`
         ]);
         return;
     }
+
+    // add reassignment to force TS to widen the type of the declaration (in case it's never reassigned anywhere else)
+    const expressionStr = str.original.substring(attr.expression.start, getEnd(attr.expression));
+    element.appendToStartEnd([
+        surroundWithIgnoreComments(`() => ${expressionStr} = __sveltets_2_any(null);`)
+    ]);
 
     // other bindings which are transformed to normal attributes/props
     const isShorthand = attr.expression.start === attr.start + 'bind:'.length;
@@ -85,17 +113,47 @@ export function handleBinding(
                       )}"`
                   ]
             : // Other typings - remove the bind: prefix
-            isShorthand
-            ? [[attr.expression.start, attr.expression.end]]
-            : [[attr.start + 'bind:'.length, str.original.lastIndexOf('=', attr.expression.start)]];
+              isShorthand
+              ? [[attr.expression.start, attr.expression.end]]
+              : [
+                    [
+                        attr.start + 'bind:'.length,
+                        str.original.lastIndexOf('=', attr.expression.start)
+                    ]
+                ];
+
     const value: TransformationArray | undefined = isShorthand
         ? preserveBind && element instanceof Element
             ? [rangeWithTrailingPropertyAccess(str.original, attr.expression)]
             : undefined
         : [rangeWithTrailingPropertyAccess(str.original, attr.expression)];
+
+    if (isSvelte5Plus && element instanceof InlineComponent) {
+        // To check if property is actually bindable
+        element.appendToStartEnd([`${element.name}.$$bindings = '${attr.name}';`]);
+    }
+
     if (element instanceof Element) {
         element.addAttribute(name, value);
     } else {
         element.addProp(name, value);
     }
+}
+
+function appendOneWayBinding(
+    attr: BaseDirective,
+    assignment: string,
+    element: Element | InlineComponent
+) {
+    const expression = attr.expression;
+    const end = getEnd(expression);
+    const hasTypeAnnotation = expression.typeAnnotation || isTypescriptNode(expression);
+    const array: TransformationArray = [
+        [expression.start, end],
+        assignment + (hasTypeAnnotation ? '' : ';')
+    ];
+    if (hasTypeAnnotation) {
+        array.push([end, expression.end], ';');
+    }
+    element.appendToStartEnd(array);
 }

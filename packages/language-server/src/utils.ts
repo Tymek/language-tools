@@ -1,7 +1,8 @@
-import { isEqual, uniqWith } from 'lodash';
-import { Node } from 'vscode-html-languageservice';
+import { isEqual, sum, uniqWith } from 'lodash';
+import { FoldingRange, Node } from 'vscode-html-languageservice';
 import { Position, Range } from 'vscode-languageserver';
 import { URI } from 'vscode-uri';
+import { Document, TagInformation } from './lib/documents';
 
 type Predicate<T> = (x: T) => boolean;
 
@@ -162,28 +163,28 @@ export function debounceSameArg<T>(
  * the next invocation. This avoids needless calls when a synchronous call (like diagnostics)
  * took too long and the whole timeout of the next call was eaten up already.
  *
- * @param fn The function with it's argument
+ * @param fn The function
  * @param miliseconds Number of miliseconds to debounce/throttle
  */
-export function debounceThrottle<T extends (...args: any) => void>(fn: T, miliseconds: number): T {
+export function debounceThrottle(fn: () => void, miliseconds: number): () => void {
     let timeout: any;
     let lastInvocation = Date.now() - miliseconds;
 
-    function maybeCall(...args: any) {
+    function maybeCall() {
         clearTimeout(timeout);
 
         timeout = setTimeout(() => {
             if (Date.now() - lastInvocation < miliseconds) {
-                maybeCall(...args);
+                maybeCall();
                 return;
             }
 
-            fn(...args);
+            fn();
             lastInvocation = Date.now();
         }, miliseconds);
     }
 
-    return maybeCall as any;
+    return maybeCall;
 }
 
 /**
@@ -294,7 +295,6 @@ export function returnObjectIfHasKeys<T>(obj: T | undefined): T | undefined {
     }
 }
 
-// eslint-disable-next-line no-useless-escape
 const fileNameLowerCaseRegExp = /[^\u0130\u0131\u00DFa-z0-9\\/:\-_\. ]+/g;
 
 /**
@@ -321,4 +321,65 @@ export function createGetCanonicalFileName(
 
 function identity<T>(x: T) {
     return x;
+}
+
+export function memoize<T>(callback: () => T): () => T {
+    let value: T;
+    let callbackInner: typeof callback | undefined = callback;
+
+    return () => {
+        if (callbackInner) {
+            value = callback();
+            callbackInner = undefined;
+        }
+        return value;
+    };
+}
+
+export function removeLineWithString(str: string, keyword: string) {
+    const lines = str.split('\n');
+    const filteredLines = lines.filter((line) => !line.includes(keyword));
+    return filteredLines.join('\n');
+}
+
+/**
+ * Traverses a string and returns the index of the end character, taking into account quotes, curlies and generic tags.
+ */
+export function traverseTypeString(str: string, start: number, endChar: string): number {
+    let singleQuoteOpen = false;
+    let doubleQuoteOpen = false;
+    let countCurlyBrace = 0;
+    let countAngleBracket = 0;
+
+    for (let i = start; i < str.length; i++) {
+        const char = str[i];
+
+        if (!doubleQuoteOpen && char === "'") {
+            singleQuoteOpen = !singleQuoteOpen;
+        } else if (!singleQuoteOpen && char === '"') {
+            doubleQuoteOpen = !doubleQuoteOpen;
+        } else if (!doubleQuoteOpen && !singleQuoteOpen) {
+            if (char === '{') {
+                countCurlyBrace++;
+            } else if (char === '}') {
+                countCurlyBrace--;
+            } else if (char === '<') {
+                countAngleBracket++;
+            } else if (char === '>') {
+                countAngleBracket--;
+            }
+        }
+
+        if (
+            !singleQuoteOpen &&
+            !doubleQuoteOpen &&
+            countCurlyBrace === 0 &&
+            countAngleBracket === 0 &&
+            char === endChar
+        ) {
+            return i;
+        }
+    }
+
+    return -1;
 }

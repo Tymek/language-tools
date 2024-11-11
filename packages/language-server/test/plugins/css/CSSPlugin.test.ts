@@ -8,7 +8,8 @@ import {
     TextEdit,
     CompletionContext,
     SelectionRange,
-    CompletionTriggerKind
+    CompletionTriggerKind,
+    FoldingRangeKind
 } from 'vscode-languageserver';
 import { DocumentManager, Document } from '../../../src/lib/documents';
 import { CSSPlugin } from '../../../src/plugins';
@@ -33,7 +34,7 @@ describe('CSS Plugin', () => {
             ],
             createLanguageServices(lsOptions)
         );
-        docManager.openDocument(<any>'some doc');
+        docManager.openClientDocument(<any>'some doc');
         return { plugin, document };
     }
 
@@ -44,7 +45,7 @@ describe('CSS Plugin', () => {
             assert.deepStrictEqual(plugin.doHover(document, Position.create(0, 8)), <Hover>{
                 contents: [
                     { language: 'html', value: '<h1>' },
-                    '[Selector Specificity](https://developer.mozilla.org/en-US/docs/Web/CSS/Specificity): (0, 0, 1)'
+                    '[Selector Specificity](https://developer.mozilla.org/docs/Web/CSS/Specificity): (0, 0, 1)'
                 ],
                 range: Range.create(0, 7, 0, 9)
             });
@@ -68,10 +69,9 @@ describe('CSS Plugin', () => {
                 contents: {
                     kind: 'markdown',
                     value:
-                        'Specifies the height of the content area,' +
-                        " padding area or border area \\(depending on 'box\\-sizing'\\)" +
-                        ' of certain boxes\\.\n' +
-                        '\nSyntax: &lt;viewport\\-length&gt;\\{1,2\\}\n\n' +
+                        "Specifies the height of the content area, padding area or border area \\(depending on 'box\\-sizing'\\) of certain boxes\\.\n\n" +
+                        '(Edge 12, Firefox 1, Safari 1, Chrome 1, IE 4, Opera 7)\n\n' +
+                        'Syntax: auto | &lt;length&gt; | &lt;percentage&gt; | min\\-content | max\\-content | fit\\-content | fit\\-content\\(&lt;length\\-percentage&gt;\\)\n\n' +
                         '[MDN Reference](https://developer.mozilla.org/docs/Web/CSS/height)'
                 },
                 range: Range.create(0, 12, 0, 24)
@@ -102,7 +102,9 @@ describe('CSS Plugin', () => {
                 kind: CompletionItemKind.Keyword,
                 documentation: {
                     kind: 'markdown',
-                    value: 'Defines character set of the document\\.\n\n[MDN Reference](https://developer.mozilla.org/docs/Web/CSS/@charset)'
+                    value:
+                        'Defines character set of the document\\.\n\n(Edge 12, Firefox 1, Safari 4, Chrome 2, IE 5, Opera 9)\n\n' +
+                        '[MDN Reference](https://developer.mozilla.org/docs/Web/CSS/@charset)'
                 },
                 textEdit: TextEdit.insert(Position.create(0, 7), '@charset'),
                 tags: []
@@ -324,6 +326,22 @@ describe('CSS Plugin', () => {
                         },
                         newText: 'hsl(240, -101%, 12750%)'
                     }
+                },
+                {
+                    label: 'hwb(240 0% -25400%)',
+                    textEdit: {
+                        range: {
+                            end: {
+                                character: 21,
+                                line: 0
+                            },
+                            start: {
+                                character: 17,
+                                line: 0
+                            }
+                        },
+                        newText: 'hwb(240 0% -25400%)'
+                    }
                 }
             ]);
         });
@@ -458,5 +476,29 @@ describe('CSS Plugin', () => {
         const selectionRange = plugin.getSelectionRange(document, Position.create(0, 10));
 
         assert.equal(selectionRange, null);
+    });
+
+    describe('folding ranges', () => {
+        it('provides folding ranges', () => {
+            const { plugin, document } = setup('<style>\n.hi {\ndisplay:none;\n}\n</style>');
+
+            const foldingRanges = plugin.getFoldingRanges(document);
+
+            assert.deepStrictEqual(foldingRanges, [{ startLine: 1, endLine: 2, kind: undefined }]);
+        });
+
+        it('provides folding ranges for known indent style', () => {
+            const { plugin, document } = setup(
+                '<style lang="sass">\n/*#region*/\n.hi\n  display:none\n.hi2\n  display: none\n/*#endregion*/\n</style>'
+            );
+
+            const foldingRanges = plugin.getFoldingRanges(document);
+
+            assert.deepStrictEqual(foldingRanges, [
+                { startLine: 1, endLine: 6, kind: FoldingRangeKind.Region },
+                { startLine: 2, endLine: 3 },
+                { startLine: 4, endLine: 5 }
+            ]);
+        });
     });
 });

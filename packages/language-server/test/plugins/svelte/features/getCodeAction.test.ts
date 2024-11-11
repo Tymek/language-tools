@@ -159,7 +159,6 @@ describe('SveltePlugin#getCodeAction', () => {
                             {
                                 edits: [
                                     {
-                                        // eslint-disable-next-line max-len
                                         newText: `<!-- svelte-ignore security-anchor-rel-noreferrer -->${EOL}`,
                                         range: {
                                             end: {
@@ -175,6 +174,88 @@ describe('SveltePlugin#getCodeAction', () => {
                                 ],
                                 textDocument: {
                                     uri: getUri(svelteAnchorMissingAttributeCodeAction),
+                                    version: null
+                                }
+                            }
+                        ]
+                    },
+                    title: '(svelte) Disable security-anchor-rel-noreferrer for this line',
+                    kind: 'quickfix'
+                }
+            ]);
+        });
+
+        const svelteAnchorMissingAttributeCodeActionRel =
+            'svelte-anchor-missing-attribute-code-action-rel.svelte';
+
+        it('Should not duplicate rel attribute', async () => {
+            (
+                await expectCodeActionFor(svelteAnchorMissingAttributeCodeActionRel, {
+                    diagnostics: [
+                        {
+                            severity: DiagnosticSeverity.Warning,
+                            code: 'security-anchor-rel-noreferrer',
+                            range: Range.create(
+                                { line: 0, character: 0 },
+                                { line: 0, character: 70 }
+                            ),
+                            message:
+                                'Security: Anchor with "target=_blank" should have rel attribute containing the value "noreferrer"',
+                            source: 'svelte'
+                        }
+                    ]
+                })
+            ).toEqual([
+                {
+                    edit: {
+                        documentChanges: [
+                            {
+                                edits: [
+                                    {
+                                        newText: ' noreferrer',
+                                        range: {
+                                            end: {
+                                                character: 58,
+                                                line: 0
+                                            },
+                                            start: {
+                                                character: 58,
+                                                line: 0
+                                            }
+                                        }
+                                    }
+                                ],
+                                textDocument: {
+                                    uri: getUri(svelteAnchorMissingAttributeCodeActionRel),
+                                    version: null
+                                }
+                            }
+                        ]
+                    },
+                    title: '(svelte) Add missing attribute rel="noreferrer"',
+                    kind: 'quickfix'
+                },
+                {
+                    edit: {
+                        documentChanges: [
+                            {
+                                edits: [
+                                    {
+                                        newText: `<!-- svelte-ignore security-anchor-rel-noreferrer -->${EOL}`,
+                                        range: {
+                                            end: {
+                                                character: 0,
+                                                line: 0
+                                            },
+                                            start: {
+                                                character: 0,
+                                                line: 0
+                                            }
+                                        }
+                                    }
+                                ],
+                                textDocument: {
+                                    uri: getUri(svelteAnchorMissingAttributeCodeActionRel),
                                     version: null
                                 }
                             }
@@ -213,7 +294,6 @@ describe('SveltePlugin#getCodeAction', () => {
                             {
                                 edits: [
                                     {
-                                        // eslint-disable-next-line max-len
                                         newText: `<!-- svelte-ignore a11y-missing-attribute -->${EOL}`,
                                         range: {
                                             end: {
@@ -341,6 +421,55 @@ describe('SveltePlugin#getCodeAction', () => {
                 }
             ]);
         });
+
+        it('should provide ignore comment in script tags', async () => {
+            (
+                await expectCodeActionFor(svelteIgnoreCodeAction, {
+                    diagnostics: [
+                        {
+                            severity: DiagnosticSeverity.Warning,
+                            code: 'state_referenced_locally',
+                            range: Range.create(
+                                { line: 13, character: 9 },
+                                { line: 13, character: 14 }
+                            ),
+                            message: '',
+                            source: 'svelte'
+                        }
+                    ]
+                })
+            ).toEqual([
+                {
+                    edit: {
+                        documentChanges: [
+                            {
+                                edits: [
+                                    {
+                                        newText: `\t// svelte-ignore state_referenced_locally${EOL}\t`,
+                                        range: {
+                                            end: {
+                                                character: 0,
+                                                line: 13
+                                            },
+                                            start: {
+                                                character: 0,
+                                                line: 13
+                                            }
+                                        }
+                                    }
+                                ],
+                                textDocument: {
+                                    uri: getUri(svelteIgnoreCodeAction),
+                                    version: null
+                                }
+                            }
+                        ]
+                    },
+                    title: '(svelte) Disable state_referenced_locally for this line',
+                    kind: 'quickfix'
+                }
+            ]);
+        });
     });
 
     describe('It should provide svelte ignore code actions (TypeScript)', () => {
@@ -369,7 +498,6 @@ describe('SveltePlugin#getCodeAction', () => {
                             {
                                 edits: [
                                     {
-                                        // eslint-disable-next-line max-len
                                         newText: `<!-- svelte-ignore a11y-missing-attribute -->${EOL}`,
                                         range: {
                                             end: {

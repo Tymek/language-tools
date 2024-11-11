@@ -6,7 +6,9 @@ import {
     CompletionItem,
     TextEdit,
     CompletionItemKind,
-    InsertTextFormat
+    InsertTextFormat,
+    CompletionTriggerKind,
+    FoldingRange
 } from 'vscode-languageserver';
 import { HTMLPlugin } from '../../../src/plugins';
 import { DocumentManager, Document } from '../../../src/lib/documents';
@@ -18,7 +20,7 @@ describe('HTML Plugin', () => {
         const docManager = new DocumentManager(() => document);
         const configManager = new LSConfigManager();
         const plugin = new HTMLPlugin(docManager, configManager);
-        docManager.openDocument(<any>'some doc');
+        docManager.openClientDocument(<any>'some doc');
         return { plugin, document, configManager };
     }
 
@@ -154,6 +156,26 @@ describe('HTML Plugin', () => {
         );
     });
 
+    it('skip HTML completions for non-HTML trigger characters', async () => {
+        const { plugin, document } = setup('<div><div>');
+
+        const completions = await plugin.getCompletions(document, Position.create(0, 5), {
+            triggerCharacter: '>',
+            triggerKind: CompletionTriggerKind.TriggerCharacter
+        });
+        assert.strictEqual(completions, null);
+    });
+
+    it('provide emmet completions with >', async () => {
+        const { plugin, document } = setup('div>');
+
+        const completions = await plugin.getCompletions(document, Position.create(0, 5), {
+            triggerCharacter: '>',
+            triggerKind: CompletionTriggerKind.TriggerCharacter
+        });
+        assert.strictEqual(completions?.items[0]?.label, 'div>');
+    });
+
     it('does not provide rename for element being uppercase', async () => {
         const { plugin, document } = setup('<Div></Div>');
 
@@ -234,7 +256,33 @@ describe('HTML Plugin', () => {
             ranges: [
                 { start: { line: 0, character: 1 }, end: { line: 0, character: 4 } },
                 { start: { line: 0, character: 7 }, end: { line: 0, character: 10 } }
-            ]
+            ],
+            wordPattern:
+                '(-?\\d*\\.\\d\\w*)|([^\\`\\~\\!\\@\\#\\^\\&\\*\\(\\)\\=\\+\\[\\{\\]\\}\\\\\\|\\;\\:\\\'\\"\\,\\<\\>\\/\\s]+)'
         });
+    });
+
+    it('provides folding range', () => {
+        const { plugin, document } = setup('<div>\n  <div>\n  </div>\n  </div>');
+
+        const ranges = plugin.getFoldingRanges(document);
+        assert.deepStrictEqual(ranges, <FoldingRange[]>[{ startLine: 0, endLine: 2 }]);
+    });
+
+    it('provides folding range for element with arrow function handler', () => {
+        const { plugin, document } = setup('<div \non:click={() => {}}\n />');
+
+        const ranges = plugin.getFoldingRanges(document);
+        assert.deepStrictEqual(ranges, <FoldingRange[]>[{ startLine: 0, endLine: 1 }]);
+    });
+
+    it('provides indent based folding range for template tag', () => {
+        const { plugin, document } = setup('<template lang="pug">\np\n  div\n</template>');
+
+        const ranges = plugin.getFoldingRanges(document);
+        assert.deepStrictEqual(ranges, <FoldingRange[]>[
+            { startLine: 0, endLine: 2 },
+            { startLine: 1, endLine: 2 }
+        ]);
     });
 });

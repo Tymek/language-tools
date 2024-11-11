@@ -68,9 +68,46 @@ export class SvelteSnapshot {
         return originalOffset;
     }
 
+    getGeneratedTextSpan(textSpan: ts.TextSpan): ts.TextSpan | null {
+        const start = this.getGeneratedOffset(textSpan.start);
+        if (start === -1) {
+            return null;
+        }
+
+        // Assumption: We don't change identifiers itself, so we don't change ranges.
+        return {
+            start,
+            length: textSpan.length
+        };
+    }
+
+    getGeneratedOffset(originalOffset: number) {
+        if (!this.scriptInfo) {
+            return originalOffset;
+        }
+
+        const lineOffset = this.scriptInfo.positionToLineOffset(originalOffset);
+        const original = this.mapper.getGeneratedPosition({
+            line: lineOffset.line - 1,
+            character: lineOffset.offset - 1
+        });
+        if (original.line === -1) {
+            return -1;
+        }
+
+        this.toggleMappingMode(true);
+        const generatedOffset = this.scriptInfo.lineOffsetToPosition(
+            original.line + 1,
+            original.character + 1
+        );
+        this.toggleMappingMode(false);
+        this.debug('converted offset to', original, '/', generatedOffset);
+        return generatedOffset;
+    }
+
     setAndPatchScriptInfo(scriptInfo: ts.server.ScriptInfo) {
         // @ts-expect-error
-        scriptInfo.scriptKind = this.typescript.ScriptKind.TSX;
+        scriptInfo.scriptKind = this.typescript.ScriptKind.TS;
 
         const positionToLineOffset = scriptInfo.positionToLineOffset.bind(scriptInfo);
         scriptInfo.positionToLineOffset = (position) => {
@@ -225,6 +262,10 @@ export class SvelteSnapshot {
         }
         return snapshot.getText(0, snapshot.getLength());
     }
+
+    getOriginalText() {
+        return this.svelteCode;
+    }
 }
 
 export class SvelteSnapshotManager {
@@ -235,7 +276,9 @@ export class SvelteSnapshotManager {
         private projectService: ts.server.ProjectService,
         private svelteOptions: { namespace: string },
         private logger: Logger,
-        private configManager: ConfigManager
+        private configManager: ConfigManager,
+        /** undefined if no node_modules with Svelte next to tsconfig.json */
+        private svelteCompiler: typeof import('svelte/compiler') | undefined
     ) {
         this.patchProjectServiceReadFile();
     }
@@ -301,19 +344,24 @@ export class SvelteSnapshotManager {
                 const normalizedPath = path.replace(/\\/g, '/');
                 if (normalizedPath.endsWith('node_modules/svelte/types/runtime/ambient.d.ts')) {
                     return '';
+                } else if (normalizedPath.endsWith('svelte2tsx/svelte-jsx.d.ts')) {
+                    // Remove the dom lib reference to not load these ambient types in case
+                    // the user has a tsconfig.json with different lib settings like in
+                    // https://github.com/sveltejs/language-tools/issues/1733
+                    const originalText = readFile(path) || '';
+                    const toReplace = '/// <reference lib="dom" />';
+                    return originalText.replace(toReplace, ' '.repeat(toReplace.length));
                 } else if (normalizedPath.endsWith('svelte2tsx/svelte-shims.d.ts')) {
                     let originalText = readFile(path) || '';
                     if (!originalText.includes('// -- start svelte-ls-remove --')) {
                         return originalText; // uses an older version of svelte2tsx or is already patched
                     }
+                    const startIdx = originalText.indexOf('// -- start svelte-ls-remove --');
+                    const endIdx = originalText.indexOf('// -- end svelte-ls-remove --');
                     originalText =
-                        originalText.substring(
-                            0,
-                            originalText.indexOf('// -- start svelte-ls-remove --')
-                        ) +
-                        originalText.substring(
-                            originalText.indexOf('// -- end svelte-ls-remove --')
-                        );
+                        originalText.substring(0, startIdx) +
+                        ' '.repeat(endIdx - startIdx) +
+                        originalText.substring(endIdx);
                     return originalText;
                 } else if (isSvelteFilePath(path)) {
                     this.logger.debug('Read Svelte file:', path);
@@ -326,8 +374,11 @@ export class SvelteSnapshotManager {
                         const result = svelte2tsx(svelteCode, {
                             filename: path.split('/').pop(),
                             isTsFile,
-                            mode: 'ts', // useNewTransformation
-                            typingsNamespace: this.svelteOptions.namespace
+                            mode: 'ts',
+                            typingsNamespace: this.svelteOptions.namespace,
+                            // Don't search for compiler from current path - could be a different one from which we have loaded the svelte2tsx globals
+                            parse: this.svelteCompiler?.parse,
+                            version: this.svelteCompiler?.VERSION
                         });
                         code = result.code;
                         mapper = new SourceMapper(result.map.mappings);
@@ -343,7 +394,7 @@ export class SvelteSnapshotManager {
 
                     // @ts-ignore
                     this.projectService.host[onReadSvelteFile].forEach((listener) =>
-                        listener(path, code, isTsFile, mapper)
+                        listener(path, svelteCode, isTsFile, mapper)
                     );
 
                     return code;

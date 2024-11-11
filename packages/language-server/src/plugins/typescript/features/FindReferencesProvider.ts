@@ -1,11 +1,15 @@
-import type ts from 'typescript';
-import { Location, Position, ReferenceContext } from 'vscode-languageserver';
+import ts from 'typescript';
+import { CancellationToken, Location, Position, ReferenceContext } from 'vscode-languageserver';
 import { Document } from '../../../lib/documents';
-import { flatten, isNotNullOrUndefined, pathToUrl } from '../../../utils';
-import { FindReferencesProvider } from '../../interfaces';
+import { flatten, isNotNullOrUndefined, normalizePath, pathToUrl } from '../../../utils';
+import { FindComponentReferencesProvider, FindReferencesProvider } from '../../interfaces';
 import { SvelteDocumentSnapshot } from '../DocumentSnapshot';
 import { LSAndTSDocResolver } from '../LSAndTSDocResolver';
-import { convertToLocationRange, hasNonZeroRange } from '../utils';
+import {
+    convertToLocationForReferenceOrDefinition,
+    hasNonZeroRange,
+    isGeneratedSvelteComponentName
+} from '../utils';
 import {
     get$storeOffsetOf$storeDeclaration,
     getStoreOffsetOf$storeDeclaration,
@@ -16,14 +20,29 @@ import {
 } from './utils';
 
 export class FindReferencesProviderImpl implements FindReferencesProvider {
-    constructor(private readonly lsAndTsDocResolver: LSAndTSDocResolver) {}
+    constructor(
+        private readonly lsAndTsDocResolver: LSAndTSDocResolver,
+        private readonly componentReferencesProvider: FindComponentReferencesProvider
+    ) {}
 
     async findReferences(
         document: Document,
         position: Position,
-        context: ReferenceContext
+        context: ReferenceContext,
+        cancellationToken?: CancellationToken
     ): Promise<Location[] | null> {
-        const { lang, tsDoc } = await this.getLSAndTSDoc(document);
+        if (
+            this.isPositionForComponentCodeLens(position) ||
+            this.isScriptStartOrEndTag(position, document)
+        ) {
+            return this.componentReferencesProvider.findComponentReferences(document.uri);
+        }
+
+        const { lang, tsDoc, lsContainer } = await this.getLSAndTSDoc(document);
+        if (cancellationToken?.isCancellationRequested) {
+            return null;
+        }
+        const offset = tsDoc.offsetAt(tsDoc.getGeneratedPosition(position));
 
         const rawReferences = lang.findReferences(
             tsDoc.filePath,
@@ -33,14 +52,36 @@ export class FindReferencesProviderImpl implements FindReferencesProvider {
             return null;
         }
 
-        const snapshots = new SnapshotMap(this.lsAndTsDocResolver);
+        const snapshots = new SnapshotMap(this.lsAndTsDocResolver, lsContainer);
         snapshots.set(tsDoc.filePath, tsDoc);
 
+        if (rawReferences.some((ref) => ref.definition.kind === ts.ScriptElementKind.alias)) {
+            const componentReferences = await this.checkIfHasAliasedComponentReference(
+                offset,
+                tsDoc,
+                lang
+            );
+
+            if (componentReferences?.length) {
+                return componentReferences;
+            }
+        }
         const references = flatten(rawReferences.map((ref) => ref.references));
-        references.push(...(await this.getStoreReferences(references, tsDoc, snapshots, lang)));
+
+        references.push(
+            ...(await this.getStoreReferences(
+                references,
+                tsDoc,
+                snapshots,
+                lang,
+                cancellationToken
+            ))
+        );
 
         const locations = await Promise.all(
-            references.map(async (ref) => this.mapReference(ref, context, snapshots))
+            references.map(async (ref) =>
+                this.mapReference(ref, context, snapshots, cancellationToken)
+            )
         );
 
         return (
@@ -51,6 +92,23 @@ export class FindReferencesProviderImpl implements FindReferencesProvider {
         );
     }
 
+    private isScriptStartOrEndTag(position: Position, document: Document) {
+        if (!document.scriptInfo) {
+            return false;
+        }
+        const { start, end } = document.scriptInfo.container;
+
+        const offset = document.offsetAt(position);
+        return (
+            (offset >= start && offset <= start + '<script'.length) ||
+            (offset >= end - '</script>'.length && offset <= end)
+        );
+    }
+
+    private isPositionForComponentCodeLens(position: Position) {
+        return position.line === 0 && position.character === 0;
+    }
+
     /**
      * If references of a $store are searched, also find references for the corresponding store
      * and vice versa.
@@ -59,13 +117,14 @@ export class FindReferencesProviderImpl implements FindReferencesProvider {
         references: ts.ReferencedSymbolEntry[],
         tsDoc: SvelteDocumentSnapshot,
         snapshots: SnapshotMap,
-        lang: ts.LanguageService
+        lang: ts.LanguageService,
+        cancellationToken: CancellationToken | undefined
     ): Promise<ts.ReferencedSymbolEntry[]> {
         // If user started finding references at $store, find references for store, too
         let storeReferences: ts.ReferencedSymbolEntry[] = [];
         const storeReference = references.find(
             (ref) =>
-                ref.fileName === tsDoc.filePath &&
+                normalizePath(ref.fileName) === tsDoc.filePath &&
                 isTextSpanInGeneratedCode(tsDoc.getFullText(), ref.textSpan) &&
                 is$storeVariableIn$storeDeclaration(tsDoc.getFullText(), ref.textSpan.start)
         );
@@ -86,6 +145,10 @@ export class FindReferencesProviderImpl implements FindReferencesProvider {
         const $storeReferences: ts.ReferencedSymbolEntry[] = [];
         for (const ref of [...references, ...storeReferences]) {
             const snapshot = await snapshots.retrieve(ref.fileName);
+            if (cancellationToken?.isCancellationRequested) {
+                return [];
+            }
+
             if (
                 !(
                     isTextSpanInGeneratedCode(snapshot.getFullText(), ref.textSpan) &&
@@ -110,10 +173,54 @@ export class FindReferencesProviderImpl implements FindReferencesProvider {
         return [...storeReferences, ...$storeReferences];
     }
 
+    private async checkIfHasAliasedComponentReference(
+        offset: number,
+        tsDoc: SvelteDocumentSnapshot,
+        lang: ts.LanguageService
+    ) {
+        const definitions = lang.getDefinitionAtPosition(tsDoc.filePath, offset);
+        if (!definitions?.length) {
+            return null;
+        }
+
+        const nonAliasDefinitions = definitions.filter((definition) =>
+            isGeneratedSvelteComponentName(definition.name)
+        );
+        const references = await Promise.all(
+            nonAliasDefinitions.map((definition) =>
+                this.componentReferencesProvider.findComponentReferences(
+                    pathToUrl(definition.fileName)
+                )
+            )
+        );
+
+        const flattened: Location[] = [];
+        for (const ref of references) {
+            if (ref) {
+                const tmp: Location[] = []; // perf optimization: we know each iteration has unique references
+                for (const r of ref) {
+                    const exists = flattened.some(
+                        (f) =>
+                            f.uri === r.uri &&
+                            f.range.start.line === r.range.start.line &&
+                            f.range.start.character === r.range.start.character
+                    );
+                    if (!exists) {
+                        tmp.push(r);
+                    }
+                }
+                flattened.push(...tmp);
+            }
+        }
+
+        return flattened;
+    }
+
     private async mapReference(
         ref: ts.ReferencedSymbolEntry,
         context: ReferenceContext,
-        snapshots: SnapshotMap
+        snapshots: SnapshotMap,
+        cancellationToken: CancellationToken | undefined
     ) {
         if (!context.includeDeclaration && ref.isDefinition) {
             return null;
@@ -121,14 +228,16 @@ export class FindReferencesProviderImpl implements FindReferencesProvider {
 
         const snapshot = await snapshots.retrieve(ref.fileName);
 
+        if (cancellationToken?.isCancellationRequested) {
+            return null;
+        }
+
         if (isTextSpanInGeneratedCode(snapshot.getFullText(), ref.textSpan)) {
             return null;
         }
 
-        const location = Location.create(
-            pathToUrl(ref.fileName),
-            convertToLocationRange(snapshot, ref.textSpan)
-        );
+        // TODO we should deduplicate if we support finding references from multiple language service
+        const location = convertToLocationForReferenceOrDefinition(snapshot, ref.textSpan);
 
         // Some references are in generated code but not wrapped with explicit ignore comments.
         // These show up as zero-length ranges, so filter them out.

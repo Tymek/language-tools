@@ -32,20 +32,21 @@ import { TsPlugin } from './tsplugin';
 import { addFindComponentReferencesListener } from './typescript/findComponentReferences';
 import { addFindFileReferencesListener } from './typescript/findFileReferences';
 import { setupSvelteKit } from './sveltekit';
+import { resolveCodeLensMiddleware } from './middlewares';
 
-// eslint-disable-next-line @typescript-eslint/no-namespace
 namespace TagCloseRequest {
     export const type: RequestType<TextDocumentPositionParams, string, any> = new RequestType(
         'html/tag'
     );
 }
 
+let lsApi: { getLS(): LanguageClient } | undefined;
+
 export function activate(context: ExtensionContext) {
     // The extension is activated on TS/JS/Svelte files because else it might be too late to configure the TS plugin:
     // If we only activate on Svelte file and the user opens a TS file first, the configuration command is issued too late.
     // We wait until there's a Svelte file open and only then start the actual language client.
     const tsPlugin = new TsPlugin(context);
-    let lsApi: { getLS(): LanguageClient } | undefined;
 
     if (workspace.textDocuments.some((doc) => doc.languageId === 'svelte')) {
         lsApi = activateSvelteLanguageServer(context);
@@ -81,6 +82,12 @@ export function activate(context: ExtensionContext) {
     };
 }
 
+export function deactivate() {
+    const stop = lsApi?.getLS().stop();
+    lsApi = undefined;
+    return stop;
+}
+
 export function activateSvelteLanguageServer(context: ExtensionContext) {
     warnIfOldExtensionInstalled();
 
@@ -105,14 +112,23 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
     // Add --experimental-modules flag for people using node 12 < version < 12.17
     // Remove this in mid 2022 and bump vs code minimum required version to 1.55
     const runExecArgv: string[] = ['--experimental-modules'];
-    let port = runtimeConfig.get<number>('port') ?? -1;
+
+    const runtimeArgs = runtimeConfig.get<string[]>('runtime-args');
+    if (runtimeArgs !== undefined) {
+        runExecArgv.push(...runtimeArgs);
+    }
+
+    const debugArgs = ['--nolazy'];
+
+    const port = runtimeConfig.get<number>('port') ?? -1;
     if (port < 0) {
-        port = 6009;
+        debugArgs.push('--inspect=6009');
     } else {
         console.log('setting port to', port);
         runExecArgv.push(`--inspect=${port}`);
     }
-    const debugOptions = { execArgv: ['--nolazy', '--experimental-modules', `--inspect=${port}`] };
+
+    debugArgs.push(...runExecArgv);
 
     const serverOptions: ServerOptions = {
         run: {
@@ -120,7 +136,11 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
             transport: TransportKind.ipc,
             options: { execArgv: runExecArgv }
         },
-        debug: { module: serverModule, transport: TransportKind.ipc, options: debugOptions }
+        debug: {
+            module: serverModule,
+            transport: TransportKind.ipc,
+            options: { execArgv: debugArgs }
+        }
     };
 
     const serverRuntime = runtimeConfig.get<string>('runtime');
@@ -143,9 +163,9 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
                 'typescript',
                 'css',
                 'less',
-                'scss'
-            ],
-            fileEvents: workspace.createFileSystemWatcher('{**/*.js,**/*.ts}', false, false, false)
+                'scss',
+                'html'
+            ]
         },
         initializationOptions: {
             configuration: {
@@ -156,17 +176,19 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
                 javascript: workspace.getConfiguration('javascript'),
                 css: workspace.getConfiguration('css'),
                 less: workspace.getConfiguration('less'),
-                scss: workspace.getConfiguration('scss')
+                scss: workspace.getConfiguration('scss'),
+                html: workspace.getConfiguration('html')
             },
             dontFilterIncompleteCompletions: true, // VSCode filters client side and is smarter at it than us
-            isTrusted: (workspace as any).isTrusted
+            isTrusted: workspace.isTrusted
+        },
+        middleware: {
+            resolveCodeLens: resolveCodeLensMiddleware
         }
     };
 
     let ls = createLanguageServer(serverOptions, clientOptions);
-    context.subscriptions.push(ls.start());
-
-    ls.onReady().then(() => {
+    ls.start().then(() => {
         const tagRequestor = (document: TextDocument, position: Position) => {
             const param = ls.code2ProtocolConverter.asTextDocumentPositionParams(
                 document,
@@ -215,8 +237,7 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
         restartingLs = true;
         await ls.stop();
         ls = createLanguageServer(serverOptions, clientOptions);
-        context.subscriptions.push(ls.start());
-        await ls.onReady();
+        await ls.start();
         if (showNotification) {
             window.showInformationMessage('Svelte language server restarted.');
         }
@@ -226,24 +247,6 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
     function getLS() {
         return ls;
     }
-
-    noteOfNewTransformation();
-    let enabled = workspace
-        .getConfiguration('svelte.plugin.svelte')
-        .get<boolean>('useNewTransformation');
-    context.subscriptions.push(
-        workspace.onDidChangeConfiguration(() => {
-            if (
-                enabled !==
-                workspace
-                    .getConfiguration('svelte.plugin.svelte')
-                    .get<boolean>('useNewTransformation')
-            ) {
-                enabled = !enabled;
-                restartLS(false);
-            }
-        })
-    );
 
     addDidChangeTextDocumentListener(getLS);
 
@@ -256,6 +259,10 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
 
     addExtracComponentCommand(getLS, context);
 
+    addMigrateToSvelte5Command(getLS, context);
+
+    addOpenLinkCommand(context);
+
     languages.setLanguageConfiguration('svelte', {
         indentationRules: {
             // Matches a valid opening tag that is:
@@ -267,15 +274,12 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
             // Or matches open curly brace
             //
             increaseIndentPattern:
-                // eslint-disable-next-line max-len, no-useless-escape
                 /<(?!\?|(?:area|base|br|col|frame|hr|html|img|input|link|meta|param)\b|[^>]*\/>)([-_\.A-Za-z0-9]+)(?=\s|>)\b[^>]*>(?!.*<\/\1>)|<!--(?!.*-->)|\{[^}"']*$/,
             // Matches a closing tag that:
             //  - Follows optional whitespace
             //  - Is not `</html>`
             // Or matches `-->`
             // Or closing curly brace
-            //
-            // eslint-disable-next-line no-useless-escape
             decreaseIndentPattern: /^\s*(<\/(?!html)[-_\.A-Za-z0-9]+\b[^>]*>|-->|\})/
         },
         // Matches a number or word that either:
@@ -285,8 +289,7 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
         //    any of the following: `~!@$^&*()=+[{]}\|;:'",.<>/
         //
         wordPattern:
-            // eslint-disable-next-line max-len, no-useless-escape
-            /(-?\d*\.\d\w*)|([^\`\~\!\@\$\#\^\&\*\(\)\=\+\[\{\]\}\\\|\;\:\'\"\,\.\<\>\/\s]+)/g,
+            /(-?\d*\.\d\w*)|([^\`\~\!\@\#\^\&\*\(\)\=\+\[\{\]\}\\\|\;\:\'\"\,\.\<\>\/\s]+)/g,
         onEnterRules: [
             {
                 // Matches an opening tag that:
@@ -294,8 +297,6 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
                 //  - Is possibly namespaced
                 //  - Isn't a void element
                 //  - Isn't followed by another tag on the same line
-                //
-                // eslint-disable-next-line no-useless-escape
                 beforeText: new RegExp(
                     `<(?!(?:${EMPTY_ELEMENTS.join(
                         '|'
@@ -314,8 +315,6 @@ export function activateSvelteLanguageServer(context: ExtensionContext) {
                 //  - Isn't namespaced
                 //  - Isn't a void element
                 //  - Isn't followed by another tag on the same line
-                //
-                // eslint-disable-next-line no-useless-escape
                 beforeText: new RegExp(
                     `<(?!(?:${EMPTY_ELEMENTS.join('|')}))(\\w[\\w\\d]*)([^/>]*(?!/)>)[^<]*$`,
                     'i'
@@ -440,6 +439,7 @@ function addCompilePreviewCommand(getLS: () => LanguageClient, context: Extensio
     const compiledCodeContentProvider = new CompiledCodeContentProvider(getLS);
 
     context.subscriptions.push(
+        // Register the content provider for "svelte-compiled://" files
         workspace.registerTextDocumentContentProvider(
             CompiledCodeContentProvider.scheme,
             compiledCodeContentProvider
@@ -453,15 +453,17 @@ function addCompilePreviewCommand(getLS: () => LanguageClient, context: Extensio
                 return;
             }
 
-            const uri = editor.document.uri;
-            const svelteUri = CompiledCodeContentProvider.toSvelteSchemeUri(uri);
             window.withProgress(
-                { location: ProgressLocation.Window, title: 'Compiling..' },
+                { location: ProgressLocation.Window, title: 'Compiling...' },
                 async () => {
-                    return await window.showTextDocument(svelteUri, {
-                        preview: true,
-                        viewColumn: ViewColumn.Beside
-                    });
+                    // Open a new preview window for the compiled code
+                    return await window.showTextDocument(
+                        CompiledCodeContentProvider.previewWindowUri,
+                        {
+                            preview: true,
+                            viewColumn: ViewColumn.Beside
+                        }
+                    );
                 }
             );
         })
@@ -497,6 +499,30 @@ function addExtracComponentCommand(getLS: () => LanguageClient, context: Extensi
     );
 }
 
+function addMigrateToSvelte5Command(getLS: () => LanguageClient, context: ExtensionContext) {
+    context.subscriptions.push(
+        commands.registerTextEditorCommand('svelte.migrate_to_svelte_5', async (editor) => {
+            if (editor?.document?.languageId !== 'svelte') {
+                return;
+            }
+
+            const uri = editor.document.uri.toString();
+            getLS().sendRequest(ExecuteCommandRequest.type, {
+                command: 'migrate_to_svelte_5',
+                arguments: [uri]
+            });
+        })
+    );
+}
+
+function addOpenLinkCommand(context: ExtensionContext) {
+    context.subscriptions.push(
+        commands.registerCommand('svelte.openLink', (url: string) => {
+            commands.executeCommand('vscode.open', Uri.parse(url));
+        })
+    );
+}
+
 function createLanguageServer(serverOptions: ServerOptions, clientOptions: LanguageClientOptions) {
     return new LanguageClient('svelte', 'Svelte', serverOptions, clientOptions);
 }
@@ -509,33 +535,4 @@ function warnIfOldExtensionInstalled() {
                 'Command line: "code --uninstall-extension JamesBirtles.svelte-vscode"'
         );
     }
-}
-
-async function noteOfNewTransformation() {
-    const enabled = workspace
-        .getConfiguration('svelte.plugin.svelte')
-        .get<boolean>('useNewTransformation');
-    const shouldNote = workspace
-        .getConfiguration('svelte.plugin.svelte')
-        .get<boolean>('note-new-transformation');
-    if (!enabled || !shouldNote) {
-        return;
-    }
-
-    const answers = ['Ask again later', 'Disable new transformation for now', 'OK'];
-    const response = await window.showInformationMessage(
-        'The Svelte for VS Code extension comes with a new transformation for improved intellisense. ' +
-            'It is enabled by default now. If you notice bugs, please report them. ' +
-            'You can switch to the old transformation setting "svelte.plugin.svelte.useNewTransformation" to "false".',
-        ...answers
-    );
-
-    if (response === answers[1]) {
-        workspace
-            .getConfiguration('svelte.plugin.svelte')
-            .update('useNewTransformation', false, true);
-    }
-    workspace
-        .getConfiguration('svelte.plugin.svelte')
-        .update('note-new-transformation', response === answers[0], true);
 }

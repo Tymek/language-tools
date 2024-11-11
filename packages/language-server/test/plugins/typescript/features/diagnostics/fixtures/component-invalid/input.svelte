@@ -1,23 +1,6 @@
 <script lang="ts">
-    import { SvelteComponentTyped } from "svelte";
     import Imported from './imported.svelte';
-
-    class Works extends SvelteComponentTyped<any, any, any> {}
-    class Works2 extends SvelteComponentTyped<
-        { hi: string },
-        { click: MouseEvent },
-        {
-            default: {
-                foo: string;
-            };
-        }
-    > {}
-    class Works3 extends SvelteComponentTyped<
-        any,
-        { [evt: string]: CustomEvent<any> },
-        never
-    > {}
-    class DoesntWork {}
+    import { Works, Works2, Works3, Works4, DoesntWork } from './components'
 </script>
 
 <!-- valid -->
@@ -45,3 +28,7 @@
 <svelte:component this={DoesntWork} foo="bar" on:click={() => ''} let:etc>
     {etc}
 </svelte:component>
+
+<!-- valid in Svelte 5 -->
+<Works4 foo="bar" />
+<svelte:component this={Works4} foo="bar" />

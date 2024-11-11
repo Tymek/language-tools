@@ -82,15 +82,31 @@ export function transform(
     }
 
     let removeStart = start;
-    for (const transformation of [...moves].sort((t1, t2) => t1[0] - t2[0])) {
+    const sortedMoves = [...moves].sort((t1, t2) => t1[0] - t2[0]);
+    // Remove everything between the transformations up until the end position
+    for (const transformation of sortedMoves) {
         if (removeStart < transformation[0]) {
-            if (deletePos !== moves.length && removeStart > deleteDest) {
+            if (
+                deletePos !== moves.length &&
+                removeStart > deleteDest &&
+                removeStart < end &&
+                transformation[0] < end
+            ) {
                 str.move(removeStart, transformation[0], end);
             }
-            // Use one space because of hover etc: This will make map deleted characters to the whitespace
-            str.overwrite(removeStart, transformation[0], ' ', { contentOnly: true });
+            if (transformation[0] < end) {
+                // Use one space because of hover etc: This will make map deleted characters to the whitespace
+                str.overwrite(removeStart, transformation[0], ' ', { contentOnly: true });
+            }
         }
         removeStart = transformation[1];
+    }
+
+    if (removeStart > end) {
+        // Reset the end to the last transformation before the end if there were transformations after the end
+        // so we still delete the correct range afterwards
+        let idx = sortedMoves.findIndex((m) => m[0] > end) - 1;
+        removeStart = sortedMoves[idx]?.[1] ?? end;
     }
 
     if (removeStart < end) {
@@ -211,4 +227,19 @@ export function rangeWithTrailingPropertyAccess(
     node: { start: number; end: number }
 ): [start: number, end: number] {
     return [node.start, withTrailingPropertyAccess(originalText, node.end)];
+}
+
+/**
+ * Get the end of the node, excluding the type annotation
+ */
+export function getEnd(node: any) {
+    return isTypescriptNode(node) ? node.expression.end : (node.typeAnnotation?.start ?? node.end);
+}
+
+export function isTypescriptNode(node: any) {
+    return (
+        node.type === 'TSAsExpression' ||
+        node.type === 'TSSatisfiesExpression' ||
+        node.type === 'TSNonNullExpression'
+    );
 }

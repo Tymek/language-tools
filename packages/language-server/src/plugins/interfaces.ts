@@ -8,8 +8,12 @@ import {
     TextDocumentContentChangeEvent
 } from 'vscode-languageserver';
 import {
+    CallHierarchyIncomingCall,
+    CallHierarchyItem,
+    CallHierarchyOutgoingCall,
     CodeAction,
     CodeActionContext,
+    CodeLens,
     Color,
     ColorInformation,
     ColorPresentation,
@@ -17,18 +21,20 @@ import {
     CompletionList,
     DefinitionLink,
     Diagnostic,
+    FoldingRange,
     FormattingOptions,
     Hover,
+    InlayHint,
     Location,
     Position,
     Range,
     ReferenceContext,
+    SelectionRange,
+    SignatureHelp,
     SymbolInformation,
     TextDocumentIdentifier,
     TextEdit,
-    WorkspaceEdit,
-    SelectionRange,
-    SignatureHelp
+    WorkspaceEdit
 } from 'vscode-languageserver-types';
 import { Document } from '../lib/documents';
 
@@ -115,6 +121,12 @@ export interface CodeActionsProvider {
         command: string,
         args?: any[]
     ): Resolvable<WorkspaceEdit | string | null>;
+
+    resolveCodeAction?(
+        document: Document,
+        codeAction: CodeAction,
+        cancellationToken?: CancellationToken
+    ): Resolvable<CodeAction>;
 }
 
 export interface FileRename {
@@ -139,7 +151,8 @@ export interface FindReferencesProvider {
     findReferences(
         document: Document,
         position: Position,
-        context: ReferenceContext
+        context: ReferenceContext,
+        cancellationToken?: CancellationToken
     ): Promise<Location[] | null>;
 }
 
@@ -176,16 +189,58 @@ export interface LinkedEditingRangesProvider {
 }
 
 export interface ImplementationProvider {
-    getImplementation(document: Document, position: Position): Resolvable<Location[] | null>;
+    getImplementation(
+        document: Document,
+        position: Position,
+        cancellationToken?: CancellationToken
+    ): Resolvable<Location[] | null>;
 }
 
 export interface TypeDefinitionProvider {
     getTypeDefinition(document: Document, position: Position): Resolvable<Location[] | null>;
 }
 
+export interface CallHierarchyProvider {
+    prepareCallHierarchy(
+        document: Document,
+        position: Position
+    ): Resolvable<CallHierarchyItem[] | null>;
+
+    getIncomingCalls(
+        item: CallHierarchyItem,
+        cancellationToken?: CancellationToken
+    ): Resolvable<CallHierarchyIncomingCall[] | null>;
+
+    getOutgoingCalls(
+        item: CallHierarchyItem,
+        cancellationToken?: CancellationToken
+    ): Resolvable<CallHierarchyOutgoingCall[] | null>;
+}
+
+export interface CodeLensProvider {
+    getCodeLens(document: Document): Resolvable<CodeLens[] | null>;
+    resolveCodeLens(
+        document: Document,
+        codeLensToResolve: CodeLens,
+        cancellationToken?: CancellationToken
+    ): Resolvable<CodeLens>;
+}
+
 export interface OnWatchFileChangesPara {
     fileName: string;
     changeType: FileChangeType;
+}
+
+export interface InlayHintProvider {
+    getInlayHints(
+        document: Document,
+        range: Range,
+        cancellationToken?: CancellationToken
+    ): Resolvable<InlayHint[] | null>;
+}
+
+export interface FoldingRangeProvider {
+    getFoldingRanges(document: Document): Resolvable<FoldingRange[]>;
 }
 
 export interface OnWatchFileChanges {
@@ -214,7 +269,11 @@ type ProviderBase = DiagnosticsProvider &
     SemanticTokensProvider &
     LinkedEditingRangesProvider &
     ImplementationProvider &
-    TypeDefinitionProvider;
+    TypeDefinitionProvider &
+    InlayHintProvider &
+    CallHierarchyProvider &
+    FoldingRangeProvider &
+    CodeLensProvider;
 
 export type LSProvider = ProviderBase & BackwardsCompatibleDefinitionsProvider;
 

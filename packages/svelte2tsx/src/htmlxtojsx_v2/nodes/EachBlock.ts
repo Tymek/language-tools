@@ -1,6 +1,6 @@
 import MagicString from 'magic-string';
 import { BaseNode } from '../../interfaces';
-import { transform, TransformationArray } from '../utils/node-utils';
+import { getEnd, transform, TransformationArray } from '../utils/node-utils';
 
 /**
  * Transform #each into a for-of loop
@@ -27,21 +27,23 @@ export function handleEach(str: MagicString, eachBlock: BaseNode): void {
     const containsComma = str.original
         .substring(eachBlock.expression.start, eachBlock.expression.end)
         .includes(',');
+    const expressionEnd = getEnd(eachBlock.expression);
+    const contextEnd = getEnd(eachBlock.context);
     const arrayAndItemVarTheSame =
-        str.original.substring(eachBlock.expression.start, eachBlock.expression.end) ===
-        str.original.substring(eachBlock.context.start, eachBlock.context.end);
+        str.original.substring(eachBlock.expression.start, expressionEnd) ===
+        str.original.substring(eachBlock.context.start, contextEnd);
     if (arrayAndItemVarTheSame) {
         transforms = [
             `{ const $$_each = __sveltets_2_ensureArray(${containsComma ? '(' : ''}`,
             [eachBlock.expression.start, eachBlock.expression.end],
             `${containsComma ? ')' : ''}); for(let `,
-            [eachBlock.context.start, eachBlock.context.end],
+            [eachBlock.context.start, contextEnd],
             ' of $$_each){'
         ];
     } else {
         transforms = [
             'for(let ',
-            [eachBlock.context.start, eachBlock.context.end],
+            [eachBlock.context.start, contextEnd],
             ` of __sveltets_2_ensureArray(${containsComma ? '(' : ''}`,
             [eachBlock.expression.start, eachBlock.expression.end],
             `${containsComma ? ')' : ''})){`

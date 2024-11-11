@@ -1,7 +1,9 @@
 import { TraceMap } from '@jridgewell/trace-mapping';
 import type { compile } from 'svelte/compiler';
+// @ts-ignore
 import { CompileOptions } from 'svelte/types/compiler/interfaces';
-import { PreprocessorGroup, Processed } from 'svelte/types/compiler/preprocess/types';
+// @ts-ignore
+import { PreprocessorGroup, Processed } from 'svelte/types/compiler/preprocess';
 import { Position } from 'vscode-languageserver';
 import { getPackageInfo, importSvelte } from '../../importPackage';
 import {
@@ -35,6 +37,7 @@ type PositionMapper = Pick<DocumentMapper, 'getGeneratedPosition' | 'getOriginal
 export class SvelteDocument {
     private transpiledDoc: ITranspiledSvelteDocument | undefined;
     private compileResult: SvelteCompileResult | undefined;
+    private svelteVersion: [number, number] | undefined;
 
     public script: TagInformation | null;
     public moduleScript: TagInformation | null;
@@ -44,6 +47,9 @@ export class SvelteDocument {
     public uri = this.parent.uri;
     public get config() {
         return this.parent.configPromise;
+    }
+    public get isSvelte5() {
+        return this.getSvelteVersion()[0] > 4;
     }
 
     constructor(private parent: Document) {
@@ -67,9 +73,7 @@ export class SvelteDocument {
 
     async getTranspiled(): Promise<ITranspiledSvelteDocument> {
         if (!this.transpiledDoc) {
-            const {
-                version: { major, minor }
-            } = getPackageInfo('svelte', this.getFilePath());
+            const [major, minor] = this.getSvelteVersion();
 
             if (major > 3 || (major === 3 && minor >= 32)) {
                 this.transpiledDoc = await TranspiledSvelteDocument.create(
@@ -79,9 +83,7 @@ export class SvelteDocument {
             } else {
                 this.transpiledDoc = await FallbackTranspiledSvelteDocument.create(
                     this.parent,
-                    (
-                        await this.config
-                    )?.preprocess
+                    (await this.config)?.preprocess
                 );
             }
         }
@@ -99,6 +101,14 @@ export class SvelteDocument {
     async getCompiledWith(options: CompileOptions = {}): Promise<SvelteCompileResult> {
         const svelte = importSvelte(this.getFilePath());
         return svelte.compile((await this.getTranspiled()).getText(), options);
+    }
+
+    private getSvelteVersion() {
+        if (!this.svelteVersion) {
+            const { major, minor } = getPackageInfo('svelte', this.getFilePath()).version;
+            this.svelteVersion = [major, minor];
+        }
+        return this.svelteVersion;
     }
 }
 
@@ -140,7 +150,10 @@ export class TranspiledSvelteDocument implements ITranspiledSvelteDocument {
         );
     }
 
-    constructor(private code: string, private mapper?: SourceMapDocumentMapper) {}
+    constructor(
+        private code: string,
+        private mapper?: SourceMapDocumentMapper
+    ) {}
 
     getOriginalPosition(generatedPosition: Position): Position {
         return this.mapper?.getOriginalPosition(generatedPosition) || generatedPosition;
@@ -367,7 +380,7 @@ export class SvelteFragmentMapper implements PositionMapper {
  */
 function wrapPreprocessors(preprocessors: PreprocessorGroup | PreprocessorGroup[] = []) {
     preprocessors = Array.isArray(preprocessors) ? preprocessors : [preprocessors];
-    return preprocessors.map((preprocessor) => {
+    return preprocessors.map((preprocessor: any) => {
         const wrappedPreprocessor: PreprocessorGroup = { markup: preprocessor.markup };
 
         if (preprocessor.script) {
@@ -404,7 +417,7 @@ async function transpile(
     const processedScripts: Processed[] = [];
     const processedStyles: Processed[] = [];
 
-    const wrappedPreprocessors = preprocessors.map((preprocessor) => {
+    const wrappedPreprocessors = preprocessors.map((preprocessor: any) => {
         const wrappedPreprocessor: PreprocessorGroup = { markup: preprocessor.markup };
 
         if (preprocessor.script) {

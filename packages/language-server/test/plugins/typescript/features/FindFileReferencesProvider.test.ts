@@ -7,10 +7,13 @@ import { LSConfigManager } from '../../../../src/ls-config';
 import { FindFileReferencesProviderImpl } from '../../../../src/plugins/typescript/features/FindFileReferencesProvider';
 import { LSAndTSDocResolver } from '../../../../src/plugins/typescript/LSAndTSDocResolver';
 import { pathToUrl } from '../../../../src/utils';
+import { serviceWarmup } from '../test-utils';
 
 const testDir = path.join(__dirname, '..');
 
-describe('FindFileReferencesProvider', () => {
+describe('FindFileReferencesProvider', function () {
+    serviceWarmup(this, testDir);
+
     function getFullPath(filename: string) {
         return path.join(testDir, 'testfiles', filename);
     }
@@ -24,14 +27,18 @@ describe('FindFileReferencesProvider', () => {
             (textDocument) => new Document(textDocument.uri, textDocument.text)
         );
         const lsConfigManager = new LSConfigManager();
-        const lsAndTsDocResolver = new LSAndTSDocResolver(docManager, [testDir], lsConfigManager);
+        const lsAndTsDocResolver = new LSAndTSDocResolver(
+            docManager,
+            [pathToUrl(testDir)],
+            lsConfigManager
+        );
         const provider = new FindFileReferencesProviderImpl(lsAndTsDocResolver);
         const document = openDoc(filename);
         return { provider, document, openDoc };
 
         function openDoc(filename: string) {
             const filePath = getFullPath(filename);
-            const doc = docManager.openDocument(<any>{
+            const doc = docManager.openClientDocument(<any>{
                 uri: pathToUrl(filePath),
                 text: ts.sys.readFile(filePath) || ''
             });
@@ -39,7 +46,7 @@ describe('FindFileReferencesProvider', () => {
         }
     }
 
-    it('finds file references', async () => {
+    it('finds file references', async function () {
         const { provider, document, openDoc } = setup('find-file-references-child.svelte');
         //Make known all the associated files
         openDoc('find-file-references-parent.svelte');

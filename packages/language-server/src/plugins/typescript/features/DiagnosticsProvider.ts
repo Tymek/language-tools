@@ -1,5 +1,5 @@
 import ts from 'typescript';
-import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-languageserver';
+import { CancellationToken, Diagnostic, DiagnosticSeverity, Range } from 'vscode-languageserver';
 import {
     Document,
     getNodeIfIsInStartTag,
@@ -21,11 +21,11 @@ import {
     isStoreVariableIn$storeDeclaration,
     get$storeOffsetOf$storeDeclaration
 } from './utils';
-import { not, flatten, passMap, regexIndexOf, swapRangeStartEndIfNecessary } from '../../../utils';
+import { not, flatten, passMap, swapRangeStartEndIfNecessary, memoize } from '../../../utils';
 import { LSConfigManager } from '../../../ls-config';
 import { isAttributeName, isEventHandler } from '../svelte-ast-utils';
 
-enum DiagnosticCode {
+export enum DiagnosticCode {
     MODIFIERS_CANNOT_APPEAR_HERE = 1184, // "Modifiers cannot appear here."
     USED_BEFORE_ASSIGNED = 2454, // "Variable '{0}' is used before being assigned."
     JSX_ELEMENT_DOES_NOT_SUPPORT_ATTRIBUTES = 2607, // "JSX element class does not support attributes because it does not have a '{0}' property."
@@ -37,10 +37,17 @@ enum DiagnosticCode {
     DUPLICATED_JSX_ATTRIBUTES = 17001, // "JSX elements cannot have multiple attributes with the same name."
     DUPLICATE_IDENTIFIER = 2300, // "Duplicate identifier 'xxx'"
     MULTIPLE_PROPS_SAME_NAME = 1117, // "An object literal cannot have multiple properties with the same name in strict mode."
-    TYPE_X_NOT_ASSIGNABLE_TO_TYPE_Y = 2345, // "Argument of type '..' is not assignable to parameter of type '..'."
+    ARG_TYPE_X_NOT_ASSIGNABLE_TO_TYPE_Y = 2345, // "Argument of type '..' is not assignable to parameter of type '..'."
+    TYPE_X_NOT_ASSIGNABLE_TO_TYPE_Y = 2322, // "Type '..' is not assignable to type '..'."
+    TYPE_X_NOT_ASSIGNABLE_TO_TYPE_Y_DID_YOU_MEAN = 2820, // "Type '..' is not assignable to type '..'. Did you mean '...'?"
+    UNKNOWN_PROP = 2353, // "Object literal may only specify known properties, and '...' does not exist in type '...'"
     MISSING_PROPS = 2739, // "Type '...' is missing the following properties from type '..': ..."
     MISSING_PROP = 2741, // "Property '..' is missing in type '..' but required in type '..'."
-    NO_OVERLOAD_MATCHES_CALL = 2769 // "No overload matches this call"
+    NO_OVERLOAD_MATCHES_CALL = 2769, // "No overload matches this call"
+    CANNOT_FIND_NAME = 2304, // "Cannot find name 'xxx'"
+    CANNOT_FIND_NAME_X_DID_YOU_MEAN_Y = 2552, // "Cannot find name '...' Did you mean '...'?"
+    EXPECTED_N_ARGUMENTS = 2554, // Expected {0} arguments, but got {1}.
+    DEPRECATED_SIGNATURE = 6387 // The signature '..' of '..' is deprecated
 }
 
 export class DiagnosticsProviderImpl implements DiagnosticsProvider {
@@ -78,18 +85,27 @@ export class DiagnosticsProviderImpl implements DiagnosticsProvider {
             ];
         }
 
-        let diagnostics: ts.Diagnostic[] = [
-            ...lang.getSyntacticDiagnostics(tsDoc.filePath),
-            ...lang.getSuggestionDiagnostics(tsDoc.filePath),
-            ...lang.getSemanticDiagnostics(tsDoc.filePath)
-        ];
+        let diagnostics: ts.Diagnostic[] = lang.getSyntacticDiagnostics(tsDoc.filePath);
+        const checkers = [lang.getSuggestionDiagnostics, lang.getSemanticDiagnostics];
+
+        for (const checker of checkers) {
+            if (cancellationToken) {
+                // wait a bit so the event loop can check for cancellation
+                // or let completion go first
+                await new Promise((resolve) => setTimeout(resolve, 10));
+                if (cancellationToken.isCancellationRequested) {
+                    return [];
+                }
+            }
+            diagnostics.push(...checker.call(lang, tsDoc.filePath));
+        }
 
         const additionalStoreDiagnostics: ts.Diagnostic[] = [];
         const notGenerated = isNotGenerated(tsDoc.getFullText());
         for (const diagnostic of diagnostics) {
             if (
                 (diagnostic.code === DiagnosticCode.NO_OVERLOAD_MATCHES_CALL ||
-                    diagnostic.code === DiagnosticCode.TYPE_X_NOT_ASSIGNABLE_TO_TYPE_Y) &&
+                    diagnostic.code === DiagnosticCode.ARG_TYPE_X_NOT_ASSIGNABLE_TO_TYPE_Y) &&
                 !notGenerated(diagnostic)
             ) {
                 if (isStoreVariableIn$storeDeclaration(tsDoc.getFullText(), diagnostic.start!)) {
@@ -116,35 +132,40 @@ export class DiagnosticsProviderImpl implements DiagnosticsProvider {
         }
         diagnostics.push(...additionalStoreDiagnostics);
 
-        diagnostics = diagnostics.filter(notGenerated).filter(not(isUnusedReactiveStatementLabel));
+        diagnostics = diagnostics
+            .filter(notGenerated)
+            .filter(not(isUnusedReactiveStatementLabel))
+            .filter((diagnostics) => !expectedTransitionThirdArgument(diagnostics, tsDoc, lang));
+
         diagnostics = resolveNoopsInReactiveStatements(lang, diagnostics);
 
-        return diagnostics
-            .map<Diagnostic>((diagnostic) => ({
-                range: convertRange(tsDoc, diagnostic),
-                severity: mapSeverity(diagnostic.category),
+        const mapRange = rangeMapper(tsDoc, document, lang);
+        const noFalsePositive = isNoFalsePositive(document, tsDoc);
+        const converted: Diagnostic[] = [];
+
+        for (const tsDiag of diagnostics) {
+            let diagnostic: Diagnostic = {
+                range: convertRange(tsDoc, tsDiag),
+                severity: mapSeverity(tsDiag.category),
                 source: isTypescript ? 'ts' : 'js',
-                message: ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'),
-                code: diagnostic.code,
-                tags: getDiagnosticTag(diagnostic)
-            }))
-            .map(
-                mapRange(
-                    tsDoc,
-                    document,
-                    this.configManager.getConfig().svelte.useNewTransformation
-                )
-            )
-            .filter(hasNoNegativeLines)
-            .filter(
-                isNoFalsePositive(
-                    this.configManager.getConfig().svelte.useNewTransformation,
-                    document,
-                    tsDoc
-                )
-            )
-            .map(enhanceIfNecessary)
-            .map(swapDiagRangeStartEndIfNecessary);
+                message: ts.flattenDiagnosticMessageText(tsDiag.messageText, '\n'),
+                code: tsDiag.code,
+                tags: getDiagnosticTag(tsDiag)
+            };
+            diagnostic = mapRange(diagnostic);
+
+            moveBindingErrorMessage(tsDiag, tsDoc, diagnostic, document);
+
+            if (!hasNoNegativeLines(diagnostic) || !noFalsePositive(diagnostic)) {
+                continue;
+            }
+
+            diagnostic = adjustIfNecessary(diagnostic, tsDoc.isSvelte5Plus);
+            diagnostic = swapDiagRangeStartEndIfNecessary(diagnostic);
+            converted.push(diagnostic);
+        }
+
+        return converted;
     }
 
     private async getLSAndTSDoc(document: Document) {
@@ -152,44 +173,89 @@ export class DiagnosticsProviderImpl implements DiagnosticsProvider {
     }
 }
 
-function mapRange(
+function moveBindingErrorMessage(
+    tsDiag: ts.Diagnostic,
+    tsDoc: SvelteDocumentSnapshot,
+    diagnostic: Diagnostic,
+    document: Document
+) {
+    if (
+        tsDiag.code === DiagnosticCode.TYPE_X_NOT_ASSIGNABLE_TO_TYPE_Y &&
+        tsDiag.start &&
+        tsDoc.getText(tsDiag.start, tsDiag.start + tsDiag.length!).endsWith('.$$bindings')
+    ) {
+        let node = tsDoc.svelteNodeAt(diagnostic.range.start);
+        while (node && node.type !== 'InlineComponent') {
+            node = node.parent!;
+        }
+        if (node) {
+            let name = tsDoc.getText(
+                tsDiag.start + tsDiag.length!,
+                tsDiag.start + tsDiag.length! + 100
+            );
+            const quoteIdx = name.indexOf("'");
+            name = name.substring(quoteIdx + 1, name.indexOf("'", quoteIdx + 1));
+            const binding: any = node.attributes.find(
+                (attr: any) => attr.type === 'Binding' && attr.name === name
+            );
+            if (binding) {
+                // try to make the error more readable for english users
+                if (
+                    diagnostic.message.startsWith("Type '") &&
+                    diagnostic.message.includes("is not assignable to type '")
+                ) {
+                    const idx = diagnostic.message.indexOf(`Type '"`) + `Type '"`.length;
+                    const propName = diagnostic.message.substring(
+                        idx,
+                        diagnostic.message.indexOf('"', idx)
+                    );
+                    diagnostic.message =
+                        "Cannot use 'bind:' with this property. It is declared as non-bindable inside the component.\n" +
+                        `To mark a property as bindable: 'let { ${propName} = $bindable() } = $props()'`;
+                } else {
+                    diagnostic.message =
+                        "Cannot use 'bind:' with this property. It is declared as non-bindable inside the component.\n" +
+                        `To mark a property as bindable: 'let { prop = $bindable() } = $props()'\n\n` +
+                        diagnostic.message;
+                }
+                diagnostic.range = {
+                    start: document.positionAt(binding.start),
+                    end: document.positionAt(binding.end)
+                };
+            }
+        }
+    }
+}
+
+function rangeMapper(
     snapshot: SvelteDocumentSnapshot,
     document: Document,
-    useNewTransformation: boolean
+    lang: ts.LanguageService
 ): (value: Diagnostic) => Diagnostic {
+    const get$$PropsDefWithCache = memoize(() => get$$PropsDef(lang, snapshot));
+    const get$$PropsAliasInfoWithCache = memoize(() =>
+        get$$PropsAliasForInfo(get$$PropsDefWithCache, lang, document)
+    );
+
     return (diagnostic) => {
         let range = mapRangeToOriginal(snapshot, diagnostic.range);
 
         if (range.start.line < 0) {
-            const is$$PropsError =
-                isAfterSvelte2TsxPropsReturn(
-                    snapshot.getFullText(),
-                    snapshot.offsetAt(diagnostic.range.start)
-                ) && diagnostic.message.includes('$$Props');
-
-            if (is$$PropsError) {
-                const propsStart = regexIndexOf(
-                    document.getText(),
-                    /(interface|type)\s+\$\$Props[\s{=]/
-                );
-
-                if (propsStart) {
-                    const start = document.positionAt(
-                        propsStart + document.getText().substring(propsStart).indexOf('$$Props')
-                    );
-                    range = {
-                        start,
-                        end: { ...start, character: start.character + '$$Props'.length }
-                    };
-                }
-            }
+            range =
+                movePropsErrorRangeBackIfNecessary(
+                    diagnostic,
+                    snapshot,
+                    get$$PropsDefWithCache,
+                    get$$PropsAliasInfoWithCache
+                ) ?? range;
         }
 
         if (
-            useNewTransformation &&
-            [DiagnosticCode.MISSING_PROP, DiagnosticCode.MISSING_PROPS].includes(
+            ([DiagnosticCode.MISSING_PROP, DiagnosticCode.MISSING_PROPS].includes(
                 diagnostic.code as number
-            ) &&
+            ) ||
+                (DiagnosticCode.TYPE_X_NOT_ASSIGNABLE_TO_TYPE_Y &&
+                    diagnostic.message.includes("'Properties<"))) &&
             !hasNonZeroRange({ range })
         ) {
             const node = getNodeIfIsInStartTag(document.html, document.offsetAt(range.start));
@@ -230,17 +296,14 @@ function hasNoNegativeLines(diagnostic: Diagnostic): boolean {
     return diagnostic.range.start.line >= 0 && diagnostic.range.end.line >= 0;
 }
 
-function isNoFalsePositive(
-    useNewTransformation: boolean,
-    document: Document,
-    tsDoc: SvelteDocumentSnapshot
-) {
+const generatedVarRegex = /'\$\$_\w+(\.\$on)?'/;
+
+function isNoFalsePositive(document: Document, tsDoc: SvelteDocumentSnapshot) {
     const text = document.getText();
     const usesPug = document.getLanguageAttribute('template') === 'pug';
 
     return (diagnostic: Diagnostic) => {
         if (
-            useNewTransformation &&
             [DiagnosticCode.MULTIPLE_PROPS_SAME_NAME, DiagnosticCode.DUPLICATE_IDENTIFIER].includes(
                 diagnostic.code as number
             )
@@ -251,8 +314,15 @@ function isNoFalsePositive(
             }
         }
 
+        if (
+            diagnostic.code === DiagnosticCode.DEPRECATED_SIGNATURE &&
+            generatedVarRegex.test(diagnostic.message)
+        ) {
+            // Svelte 5: $on and constructor is deprecated, but we don't want to show this warning for generated code
+            return false;
+        }
+
         return (
-            isNoJsxCannotHaveMultipleAttrsError(diagnostic) &&
             isNoUsedBeforeAssigned(diagnostic, text, tsDoc) &&
             (!usesPug || isNoPugFalsePositive(diagnostic, document))
         );
@@ -289,21 +359,12 @@ function isNoUsedBeforeAssigned(
 }
 
 /**
- * Jsx cannot have multiple attributes with same name,
- * but that's allowed for svelte
+ * Some diagnostics have JSX-specific or confusing nomenclature. Enhance/adjust them for more clarity.
  */
-function isNoJsxCannotHaveMultipleAttrsError(diagnostic: Diagnostic) {
-    return diagnostic.code !== DiagnosticCode.DUPLICATED_JSX_ATTRIBUTES;
-}
-
-/**
- * Some diagnostics have JSX-specific nomenclature. Enhance them for more clarity.
- */
-function enhanceIfNecessary(diagnostic: Diagnostic): Diagnostic {
+function adjustIfNecessary(diagnostic: Diagnostic, isSvelte5Plus: boolean): Diagnostic {
     if (
-        diagnostic.code === DiagnosticCode.CANNOT_BE_USED_AS_JSX_COMPONENT ||
-        (diagnostic.code === DiagnosticCode.TYPE_X_NOT_ASSIGNABLE_TO_TYPE_Y &&
-            diagnostic.message.includes('ConstructorOfATypedSvelteComponent'))
+        diagnostic.code === DiagnosticCode.ARG_TYPE_X_NOT_ASSIGNABLE_TO_TYPE_Y &&
+        diagnostic.message.includes('ConstructorOfATypedSvelteComponent')
     ) {
         return {
             ...diagnostic,
@@ -312,20 +373,11 @@ function enhanceIfNecessary(diagnostic: Diagnostic): Diagnostic {
                 '\n\nPossible causes:\n' +
                 '- You use the instance type of a component where you should use the constructor type\n' +
                 '- Type definitions are missing for this Svelte Component. ' +
-                'If you are using Svelte 3.31+, use SvelteComponentTyped to add a definition:\n' +
-                '  import type { SvelteComponentTyped } from "svelte";\n' +
-                '  class ComponentName extends SvelteComponentTyped<{propertyName: string;}> {}'
-        };
-    }
-
-    if (diagnostic.code === DiagnosticCode.JSX_ELEMENT_DOES_NOT_SUPPORT_ATTRIBUTES) {
-        return {
-            ...diagnostic,
-            message:
-                'Element does not support attributes because ' +
-                'type definitions are missing for this Svelte Component or element cannot be used as such.\n\n' +
-                'Underlying error:\n' +
-                diagnostic.message
+                (isSvelte5Plus
+                    ? ''
+                    : 'If you are using Svelte 3.31+, use SvelteComponentTyped to add a definition:\n' +
+                      '  import type { SvelteComponentTyped } from "svelte";\n' +
+                      '  class ComponentName extends SvelteComponentTyped<{propertyName: string;}> {}')
         };
     }
 
@@ -455,4 +507,133 @@ function dedupDiagnostics() {
             return true;
         }
     };
+}
+
+function get$$PropsAliasForInfo(
+    get$$PropsDefWithCache: () => ReturnType<typeof get$$PropsDef>,
+    lang: ts.LanguageService,
+    document: Document
+) {
+    if (!/type\s+\$\$Props[\s\n]+=/.test(document.getText())) {
+        return;
+    }
+
+    const propsDef = get$$PropsDefWithCache();
+    if (!propsDef || !ts.isTypeAliasDeclaration(propsDef)) {
+        return;
+    }
+
+    const type = lang.getProgram()?.getTypeChecker()?.getTypeAtLocation(propsDef.name);
+    if (!type) {
+        return;
+    }
+
+    // TS says symbol is always defined but it's not
+    const rootSymbolName = (type.aliasSymbol ?? type.symbol)?.name;
+    if (!rootSymbolName) {
+        return;
+    }
+
+    return [rootSymbolName, propsDef] as const;
+}
+
+function get$$PropsDef(lang: ts.LanguageService, snapshot: SvelteDocumentSnapshot) {
+    const program = lang.getProgram();
+    const sourceFile = program?.getSourceFile(snapshot.filePath);
+    if (!program || !sourceFile) {
+        return undefined;
+    }
+
+    const renderFunction = sourceFile.statements.find(
+        (statement): statement is ts.FunctionDeclaration =>
+            ts.isFunctionDeclaration(statement) && statement.name?.getText() === 'render'
+    );
+    return renderFunction?.body?.statements.find(
+        (node): node is ts.TypeAliasDeclaration | ts.InterfaceDeclaration =>
+            (ts.isTypeAliasDeclaration(node) || ts.isInterfaceDeclaration(node)) &&
+            node.name.getText() === '$$Props'
+    );
+}
+
+function movePropsErrorRangeBackIfNecessary(
+    diagnostic: Diagnostic,
+    snapshot: SvelteDocumentSnapshot,
+    get$$PropsDefWithCache: () => ReturnType<typeof get$$PropsDef>,
+    get$$PropsAliasForWithCache: () => ReturnType<typeof get$$PropsAliasForInfo>
+): Range | undefined {
+    const possibly$$PropsError = isAfterSvelte2TsxPropsReturn(
+        snapshot.getFullText(),
+        snapshot.offsetAt(diagnostic.range.start)
+    );
+    if (!possibly$$PropsError) {
+        return;
+    }
+
+    if (diagnostic.message.includes('$$Props')) {
+        const propsDef = get$$PropsDefWithCache();
+        const generatedPropsStart = propsDef?.name.getStart();
+        const propsStart =
+            generatedPropsStart != null &&
+            snapshot.getOriginalPosition(snapshot.positionAt(generatedPropsStart));
+
+        if (propsStart) {
+            return {
+                start: propsStart,
+                end: { ...propsStart, character: propsStart.character + '$$Props'.length }
+            };
+        }
+
+        return;
+    }
+
+    const aliasForInfo = get$$PropsAliasForWithCache();
+    if (!aliasForInfo) {
+        return;
+    }
+
+    const [aliasFor, propsDef] = aliasForInfo;
+    if (diagnostic.message.includes(aliasFor)) {
+        return mapRangeToOriginal(snapshot, {
+            start: snapshot.positionAt(propsDef.name.getStart()),
+            end: snapshot.positionAt(propsDef.name.getEnd())
+        });
+    }
+}
+
+function expectedTransitionThirdArgument(
+    diagnostic: ts.Diagnostic,
+    tsDoc: SvelteDocumentSnapshot,
+    lang: ts.LanguageService
+) {
+    if (
+        diagnostic.code !== DiagnosticCode.EXPECTED_N_ARGUMENTS ||
+        !diagnostic.start ||
+        !tsDoc.getText(0, diagnostic.start).endsWith('__sveltets_2_ensureTransition(')
+    ) {
+        return false;
+    }
+
+    const node = findDiagnosticNode(diagnostic);
+    if (!node) {
+        return false;
+    }
+
+    // in TypeScript 5.4 the error is on the function name
+    // in earlier versions it's on the whole call expression
+    const callExpression =
+        ts.isIdentifier(node) && ts.isCallExpression(node.parent)
+            ? node.parent
+            : findNodeAtSpan(
+                  node,
+                  { start: node.getStart(), length: node.getWidth() },
+                  ts.isCallExpression
+              );
+
+    const signature =
+        callExpression && lang.getProgram()?.getTypeChecker().getResolvedSignature(callExpression);
+
+    return (
+        signature?.parameters.filter((parameter) => !(parameter.flags & ts.SymbolFlags.Optional))
+            .length === 3
+    );
 }

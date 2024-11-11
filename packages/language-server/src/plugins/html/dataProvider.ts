@@ -1,8 +1,9 @@
 import { IAttributeData, ITagData, newHTMLDataProvider } from 'vscode-html-languageservice';
 import { htmlData } from 'vscode-html-languageservice/lib/umd/languageFacts/data/webCustomData';
+import { unique } from '../../utils';
 
 const svelteEvents = [
-    ...htmlData.globalAttributes!.map(mapToSvelteEvent),
+    ...(htmlData.globalAttributes?.filter(isEvent).map(mapToSvelteEvent) ?? []),
     {
         name: 'on:introstart',
         description: 'Available when element has transition'
@@ -32,7 +33,8 @@ const svelteEvents = [
     { name: 'on:mouseenter' },
     { name: 'on:mouseleave' },
     // Other
-    { name: 'on:hashchange' }
+    { name: 'on:hashchange' },
+    { name: 'on:visibilitychange' }
 ];
 const svelteAttributes: IAttributeData[] = [
     {
@@ -41,6 +43,10 @@ const svelteAttributes: IAttributeData[] = [
     },
     {
         name: 'bind:textContent',
+        description: 'Available when contenteditable=true'
+    },
+    {
+        name: 'bind:innerText',
         description: 'Available when contenteditable=true'
     },
     {
@@ -60,12 +66,34 @@ const svelteAttributes: IAttributeData[] = [
         description: 'Available for block level elements. (read-only)'
     },
     {
+        name: 'bind:contentRect',
+        description: 'Available for all elements. (read-only)'
+    },
+    {
+        name: 'bind:contentBoxSize',
+        description: 'Available for all elements. (read-only)'
+    },
+    {
+        name: 'bind:borderBoxSize',
+        description: 'Available for all elements. (read-only)'
+    },
+    {
+        name: 'bind:devicePixelContentBoxSize',
+        description: 'Available for all elements. (read-only)'
+    },
+    {
         name: 'bind:this',
         description:
             'To get a reference to a DOM node, use bind:this. If used on a component, gets a reference to that component instance.'
     }
 ];
 const sveltekitAttributes: IAttributeData[] = [
+    {
+        name: 'data-sveltekit-keepfocus',
+        description:
+            'SvelteKit-specific attribute. Currently focused element will retain focus after navigation. Otherwise, focus will be reset to the body.',
+        valueSet: 'v'
+    },
     {
         name: 'data-sveltekit-noscroll',
         description:
@@ -96,6 +124,12 @@ const sveltekitAttributes: IAttributeData[] = [
         name: 'data-sveltekit-reload',
         description:
             'SvelteKit-specific attribute. Will cause SvelteKit to do a normal browser navigation which results in a full page reload.',
+        valueSet: 'v'
+    },
+    {
+        name: 'data-sveltekit-replacestate',
+        description:
+            'SvelteKit-specific attribute. Will replace the current `history` entry rather than creating a new one with `pushState` when the link is clicked.',
         valueSet: 'v'
     }
 ];
@@ -163,6 +197,22 @@ const svelteTags: ITagData[] = [
             {
                 name: 'bind:online',
                 description: 'An alias for window.navigator.onLine'
+            }
+        ]
+    },
+    {
+        name: 'svelte:document',
+        description:
+            "As with <svelte:window>, this element allows you to add listeners to events on document, such as visibilitychange, which don't fire on window.",
+        attributes: [
+            {
+                name: 'bind:fullscreenElement',
+                description:
+                    'Bind to the element that is being in full screen mode in this document. (read-only)'
+            },
+            {
+                name: 'bind:visibilityState',
+                description: 'Bind to visibility of the document. (read-only)'
             }
         ]
     },
@@ -291,6 +341,9 @@ const mediaAttributes: IAttributeData[] = [
     },
     {
         name: 'bind:muted'
+    },
+    {
+        name: 'bind:readyState'
     }
 ];
 const videoAttributes: IAttributeData[] = [
@@ -319,12 +372,20 @@ const addAttributes: Record<string, IAttributeData[]> = {
         indeterminateAttribute,
         { ...indeterminateAttribute, name: 'bind:indeterminate' }
     ],
+    img: [{ name: 'bind:naturalWidth' }, { name: 'bind:naturalHeight' }],
     textarea: [{ name: 'bind:value' }],
     video: [...mediaAttributes, ...videoAttributes],
     audio: [...mediaAttributes],
     details: [
         {
             name: 'bind:open'
+        }
+    ],
+    script: [
+        {
+            name: 'generics',
+            description:
+                'Generics used within the components. Only available when using TypeScript.'
         }
     ]
 };
@@ -349,8 +410,18 @@ export const svelteHtmlDataProvider = newHTMLDataProvider('svelte-builtin', {
         ...sveltekitAttributes
     ],
     tags: [...html5Tags, ...svelteTags],
-    valueSets: htmlData.valueSets
+
+    // TODO remove this after it's fixed in the html language service
+    valueSets:
+        htmlData.valueSets?.map((set) => ({
+            name: set.name,
+            values: unique(set.values)
+        })) ?? []
 });
+
+function isEvent(attr: IAttributeData) {
+    return attr.name.startsWith('on');
+}
 
 function mapToSvelteEvent(attr: IAttributeData) {
     return {

@@ -18,13 +18,17 @@ export class Document extends WritableDocument {
     configPromise: Promise<SvelteConfig | undefined>;
     config?: SvelteConfig;
     html!: HTMLDocument;
+    openedByClient = false;
     /**
      * Compute and cache directly because of performance reasons
      * and it will be called anyway.
      */
     private path = urlToPath(this.url);
 
-    constructor(public url: string, public content: string) {
+    constructor(
+        public url: string,
+        public content: string
+    ) {
         super();
         this.configPromise = configLoader.awaitConfig(this.getFilePath() || '');
         this.updateDocInfo();
@@ -66,8 +70,6 @@ export class Document extends WritableDocument {
      * Get text content
      */
     getText(range?: Range): string {
-        // Currently none of our own methods use the optional range parameter,
-        // but it's used by the HTML language service during hover
         if (range) {
             return this.content.substring(this.offsetAt(range.start), this.offsetAt(range.end));
         }
@@ -107,8 +109,8 @@ export class Document extends WritableDocument {
             (tag === 'style'
                 ? this.styleInfo?.attributes
                 : tag === 'script'
-                ? this.scriptInfo?.attributes || this.moduleScriptInfo?.attributes
-                : this.templateInfo?.attributes) || {};
+                  ? this.scriptInfo?.attributes || this.moduleScriptInfo?.attributes
+                  : this.templateInfo?.attributes) || {};
         const lang = attrs.lang || attrs.type || '';
         return lang.replace(/^text\//, '');
     }
@@ -124,6 +126,9 @@ export class Document extends WritableDocument {
         );
     }
 
+    /**
+     * @deprecated This no longer exists in svelte-preprocess v5, we leave it in in case someone is using this with v4
+     */
     private addDefaultLanguage(
         config: SvelteConfig | undefined,
         tagInfo: TagInformation | null,

@@ -54,7 +54,7 @@ Install a plugin for your editor:
 
 The language server has quite a few settings to toggle features. They are listed below. When using the VS Code extension, you can set these through the settings UI or in the `settings.json` using the keys mentioned below.
 
-When using the language server directly, put the settings as JSON inside `initializationOptions.configuration` for the [initialize command](https://microsoft.github.io/language-server-protocol/specification#initialize). When using the [didChangeConfiguration command](https://microsoft.github.io/language-server-protocol/specification#workspace_didChangeConfiguration), pass the JSON directly. The language server also accepts configuration for Emmet (key: `emmet`), Prettier (key: `prettier`), CSS (key: `css` / `less` / `scss`) and TypeScript (keys: `javascript` and `typescript` for JS/TS config).
+When using the language server directly, put the settings as JSON inside `initializationOptions.configuration` for the [initialize command](https://microsoft.github.io/language-server-protocol/specification#initialize). When using the [didChangeConfiguration command](https://microsoft.github.io/language-server-protocol/specification#workspace_didChangeConfiguration), pass the JSON directly. The language server also accepts configuration for Emmet (key: `emmet`; [settings reference](https://github.com/microsoft/vscode/blob/main/extensions/emmet/package.json#L26)), Prettier (key: `prettier`), CSS (key: `css` / `less` / `scss`; [settings reference](https://github.com/microsoft/vscode/blob/main/extensions/css-language-features/package.json#L36)) and TypeScript (keys: `javascript` and `typescript` for JS/TS config; [settings reference](https://github.com/microsoft/vscode/blob/main/extensions/typescript-language-features/package.json#L141)).
 
 Example:
 
@@ -209,10 +209,6 @@ Enable Linked Editing for HTML. _Default_: `true`
 
 Enable the Svelte plugin. _Default_: `true`
 
-##### `svelte.plugin.svelte.useNewTransformation`
-
-Svelte files need to be transformed to something that TypeScript understands for intellisense. Version 2.0 of this transformation can be enabled with this setting. It will be the default, soon.
-
 ##### `svelte.plugin.svelte.diagnostics.enable`
 
 Enable diagnostic messages for Svelte. _Default_: `true`
@@ -284,6 +280,10 @@ Enable code actions for Svelte. _Default_: `true`
 ##### `svelte.plugin.svelte.selectionRange.enable`
 
 Enable selection range for Svelte. _Default_: `true`
+
+##### `svelte.plugin.svelte.runesLegacyModeCodeLens.enable`
+
+Whether or not to show a code lens at the top of Svelte files indicating if they are in runes mode or legacy mode. Only visible in Svelte 5 projects. _Default_: `true`
 
 ##### `svelte.plugin.svelte.defaultScriptLanguage`
 

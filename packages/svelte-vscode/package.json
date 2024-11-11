@@ -7,7 +7,7 @@
         "build:grammar": "npx js-yaml syntaxes/svelte.tmLanguage.src.yaml > syntaxes/svelte.tmLanguage.json && npx js-yaml syntaxes/postcss.src.yaml > syntaxes/postcss.json",
         "build:ts": "tsc -p ./",
         "build": "npm run build:ts && npm run build:grammar",
-        "vscode:prepublish": "npm run build && npm prune --production",
+        "vscode:prepublish": "npm install && npm run build && npm prune --production",
         "watch": "npm run build:grammar && tsc -w -p ./",
         "test": "npm run build:grammar && node test/grammar/test.js"
     },
@@ -37,7 +37,7 @@
         "Formatters"
     ],
     "engines": {
-        "vscode": "^1.52.0"
+        "vscode": "^1.82.0"
     },
     "activationEvents": [
         "onLanguage:svelte",
@@ -48,6 +48,11 @@
     "capabilities": {
         "untrustedWorkspaces": {
             "supported": "limited",
+            "restrictedConfigurations": [
+                "svelte.language-server.runtime",
+                "svelte.language-server.ls-path",
+                "svelte.language-server.runtime-args"
+            ],
             "description": "The extension requires workspace trust because it executes code specified by the workspace. Loading the user's node_modules and loading svelte config files is disabled when untrusted"
         }
     },
@@ -75,16 +80,19 @@
                     "description": "Ask on startup to enable the TypeScript plugin."
                 },
                 "svelte.language-server.runtime": {
-                    "scope": "application",
                     "type": "string",
                     "title": "Language Server Runtime",
                     "description": "- You normally don't need this - Path to the node executable to use to spawn the language server. This is useful when you depend on native modules such as node-sass as without this they will run in the context of vscode, meaning node version mismatch is likely. Minimum required node version is 12.17. This setting can only be changed in user settings for security reasons."
                 },
                 "svelte.language-server.ls-path": {
-                    "scope": "application",
                     "type": "string",
                     "title": "Language Server Path",
                     "description": "- You normally don't set this - Path to the language server executable. If you installed the \"svelte-language-server\" npm package, it's within there at \"bin/server.js\". Path can be either relative to your workspace root or absolute. Set this only if you want to use a custom version of the language server. This will then also use the workspace version of TypeScript. This setting can only be changed in user settings for security reasons."
+                },
+                "svelte.language-server.runtime-args": {
+                    "type": "array",
+                    "title": "Language Server Runtime Args",
+                    "description": "You normally don't set this. Additional arguments to pass to the node executable when spawning the language server. This is useful when you use something like Yarn PnP and need its loader arguments `[\"--loader\", \".pnp.loader.mjs\"]`."
                 },
                 "svelte.language-server.port": {
                     "type": "number",
@@ -279,18 +287,6 @@
                     "title": "Svelte",
                     "description": "Enable the Svelte plugin"
                 },
-                "svelte.plugin.svelte.useNewTransformation": {
-                    "type": "boolean",
-                    "default": true,
-                    "title": "Use a new transformation for intellisense",
-                    "description": "Svelte files need to be transformed to something that TypeScript understands for intellisense. Version 2.0 of this transformation can be enabled with this setting. It will be the default, soon."
-                },
-                "svelte.plugin.svelte.note-new-transformation": {
-                    "type": "boolean",
-                    "default": true,
-                    "title": "Show a note about the new transformation",
-                    "description": "There's a new transformation for improved intellisense which is now turned on by default. This note notifies you about it."
-                },
                 "svelte.plugin.svelte.diagnostics.enable": {
                     "type": "boolean",
                     "default": true,
@@ -387,6 +383,12 @@
                     "default": true,
                     "title": "Svelte: Rename",
                     "description": "Enable rename/move Svelte files functionality"
+                },
+                "svelte.plugin.svelte.runesLegacyModeCodeLens.enable": {
+                    "type": "boolean",
+                    "default": true,
+                    "title": "Svelte: Legacy/Runes mode Code Lens",
+                    "description": "Show a code lens at the top of Svelte files indicating if they are in runes mode or legacy mode. Only visible in Svelte 5 projects."
                 },
                 "svelte.plugin.svelte.defaultScriptLanguage": {
                     "type": "string",
@@ -496,7 +498,8 @@
                 "scopeName": "markdown.svelte.codeblock",
                 "path": "./syntaxes/markdown-svelte.json",
                 "injectTo": [
-                    "text.html.markdown"
+                    "text.html.markdown",
+                    "source.mdx"
                 ],
                 "embeddedLanguages": {
                     "meta.embedded.block.svelte": "svelte"
@@ -506,14 +509,16 @@
                 "scopeName": "markdown.svelte.codeblock.script",
                 "path": "./syntaxes/markdown-svelte-js.json",
                 "injectTo": [
-                    "text.html.markdown"
+                    "text.html.markdown",
+                    "source.mdx"
                 ]
             },
             {
                 "scopeName": "markdown.svelte.codeblock.style",
                 "path": "./syntaxes/markdown-svelte-css.json",
                 "injectTo": [
-                    "text.html.markdown"
+                    "text.html.markdown",
+                    "source.mdx"
                 ]
             },
             {
@@ -540,6 +545,10 @@
             {
                 "command": "svelte.extractComponent",
                 "title": "Svelte: Extract Component"
+            },
+            {
+                "command": "svelte.migrate_to_svelte_5",
+                "title": "Svelte: Migrate Component to Svelte 5 Syntax"
             },
             {
                 "command": "svelte.typescript.findAllFileReferences",
@@ -718,18 +727,19 @@
         ]
     },
     "devDependencies": {
-        "@tsconfig/node12": "^1.0.0",
         "@types/lodash": "^4.14.116",
-        "@types/node": "^13.9.0",
-        "@types/vscode": "*",
+        "@types/node": "^18.0.0",
+        "@types/vscode": "^1.67",
         "js-yaml": "^3.14.0",
-        "typescript": "*",
+        "tslib": "^2.4.0",
+        "typescript": "^5.6.3",
         "vscode-tmgrammar-test": "^0.0.11"
     },
     "dependencies": {
         "lodash": "^4.17.21",
-        "svelte-language-server": "*",
-        "vscode-languageclient": "^7.0.0",
-        "typescript-svelte-plugin": "*"
+        "svelte-language-server": "workspace:*",
+        "typescript-svelte-plugin": "workspace:*",
+        "vscode-languageclient": "^9.0.1",
+        "vscode-languageserver-protocol": "3.17.5"
     }
 }
